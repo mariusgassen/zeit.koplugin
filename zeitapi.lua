@@ -17,7 +17,6 @@ htmlparser).
 
 local ffiutil = require("ffi/util")
 local http = require("socket.http")
-local httpasync = require("httpasync")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local ltn12 = require("ltn12")
@@ -539,8 +538,6 @@ local ext_to_mimetype = {
     webp = "image/webp",
 }
 
-local MAX_CONCURRENT_DOWNLOADS = 6
-
 --- Builds an EPUB at epub_path from the article HTML fetched from url.
 -- meta: { title, author, published } as returned by extractArticleMeta().
 function ZeitApi:createEpub(epub_path, html, url, meta, include_images, message, article_selectors, unwanted_selectors)
@@ -705,43 +702,41 @@ function ZeitApi:createEpub(epub_path, html, url, meta, include_images, message,
     collectgarbage()
     collectgarbage()
 
+    -- Downloaded sequentially rather than concurrently: KOReader's
+    -- httpasync module (used for this in newsdownloader.koplugin) isn't
+    -- present in every KOReader version/build. Slower for image-heavy
+    -- articles, but works everywhere.
     local cancelled = false
     if include_images and #images > 0 then
-        local before_images_time = time.now()
-        local time_prev = before_images_time
+        local total = #images
         local failed_images = {}
-        local tasks = {}
+        local time_prev = time.now()
         for inum, img in ipairs(images) do
-            table.insert(tasks, { inum = inum, img = img })
-        end
-        local download_completed = httpasync.fetch_many(tasks, {
-            concurrency = MAX_CONCURRENT_DOWNLOADS,
-            get_url = function(task) return task.img.src end,
-            on_success = function(task, content)
-                local no_compression = task.img.mimetype ~= "image/svg+xml"
-                epub:addFileFromMemory("OEBPS/" .. task.img.imgpath, content, no_compression, mtime)
-            end,
-            on_failure = function(task, err)
-                logger.info("ZeitApi: failed fetching image:", task.img.src, err)
-                table.insert(failed_images, task.inum)
-            end,
-            on_progress = function(completed, total)
-                if time.to_ms(time.since(time_prev)) > 1000 then
-                    time_prev = time.now()
-                    local errors = #failed_images
-                    local prefix = message and message ~= "" and message .. "\n\n" or ""
-                    local go_on
-                    if errors > 0 then
-                        go_on = UI:info(prefix .. T(_("Lade Bilder… %1 / %2 (%3 Fehler)"), completed, total, errors), completed >= 1)
-                    else
-                        go_on = UI:info(prefix .. T(_("Lade Bilder… %1 / %2"), completed, total), completed >= 1)
-                    end
-                    if not go_on then return false end
+            local ok, _content_type, content = getUrlContent(img.src, nil, 10, 30)
+            if ok then
+                local no_compression = img.mimetype ~= "image/svg+xml"
+                epub:addFileFromMemory("OEBPS/" .. img.imgpath, content, no_compression, mtime)
+            else
+                logger.info("ZeitApi: failed fetching image:", img.src, content)
+                table.insert(failed_images, inum)
+            end
+
+            if time.to_ms(time.since(time_prev)) > 1000 or inum == total then
+                time_prev = time.now()
+                local errors = #failed_images
+                local prefix = message and message ~= "" and message .. "\n\n" or ""
+                local go_on
+                if errors > 0 then
+                    go_on = UI:info(prefix .. T(_("Lade Bilder… %1 / %2 (%3 Fehler)"), inum, total, errors), true)
+                else
+                    go_on = UI:info(prefix .. T(_("Lade Bilder… %1 / %2"), inum, total), true)
                 end
-                return true
-            end,
-        })
-        if not download_completed then cancelled = true end
+                if not go_on then
+                    cancelled = true
+                    break
+                end
+            end
+        end
     end
 
     if cancelled then
