@@ -298,6 +298,174 @@ function ZeitApi:extractArticleMeta(html)
 end
 
 -- ---------------------------------------------------------------------
+-- Direct EPUB download (e.g. the officially pre-built EPUB ZEIT offers
+-- per print issue via epaper.zeit.de, served from media-delivery.zeit.de)
+-- ---------------------------------------------------------------------
+
+--- Finds the first media-delivery.zeit.de EPUB link in html, e.g. the
+-- one behind an epaper.zeit.de issue page's "EPUB" download button.
+function ZeitApi:extractEpubLink(html)
+    return html:match('href="(https?://media%-delivery%.zeit%.de/[^"]-%.epub)"')
+        or html:match("href='(https?://media%-delivery%.zeit%.de/[^']-%.epub)'")
+        or html:match("(https?://media%-delivery%.zeit%.de/[^%s\"'<>]-%.epub)")
+end
+
+--- Downloads url's raw bytes to file_path as-is (no HTML reduction),
+-- for an already-complete EPUB. Raises an error (to be caught with
+-- pcall by the caller) on network failure.
+function ZeitApi:downloadFile(file_path, url, cookies)
+    local _content_type, content = self:loadPage(url, cookies, nil)
+    local file_path_tmp = file_path .. ".tmp"
+    local f = io.open(file_path_tmp, "wb")
+    if not f then
+        return false
+    end
+    f:write(content)
+    f:close()
+    os.rename(file_path_tmp, file_path)
+    return true
+end
+
+-- ---------------------------------------------------------------------
+-- Feed parsing (RSS 2.0 / Atom)
+-- ---------------------------------------------------------------------
+
+local function feedTrim(s)
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function stripCDATA(s)
+    if not s then return s end
+    local inner = s:match("^%s*<!%[CDATA%[(.-)%]%]>%s*$")
+    return inner or s
+end
+
+local function extractFeedTag(block, tag)
+    local content = block:match("<" .. tag .. "[^>]*>(.-)</" .. tag .. ">")
+    if content then
+        return feedTrim(stripCDATA(content))
+    end
+    return nil
+end
+
+local function extractAtomLink(block)
+    return block:match('<link[^>]-rel="alternate"[^>]-href="([^"]*)"')
+        or block:match('<link[^>]-href="([^"]*)"[^>]-rel="alternate"')
+        or block:match('<link[^>]-href="([^"]*)"[^>]*/?>')
+end
+
+--- Parses an RSS 2.0 or Atom feed body into a list of
+-- { title, link, pubDate } entries (pubDate may be nil).
+function ZeitApi:parseFeed(xml)
+    local items = {}
+    for block in xml:gmatch("<item[^>]*>(.-)</item>") do
+        local title = extractFeedTag(block, "title")
+        local link = extractFeedTag(block, "link")
+        local pubdate = extractFeedTag(block, "pubDate")
+        if title and link and link ~= "" then
+            table.insert(items, { title = title, link = feedTrim(link), pubDate = pubdate })
+        end
+    end
+    if #items == 0 then
+        for block in xml:gmatch("<entry[^>]*>(.-)</entry>") do
+            local title = extractFeedTag(block, "title")
+            local link = extractAtomLink(block)
+            local pubdate = extractFeedTag(block, "updated") or extractFeedTag(block, "published")
+            if title and link and link ~= "" then
+                table.insert(items, { title = title, link = feedTrim(link), pubDate = pubdate })
+            end
+        end
+    end
+    return items
+end
+
+-- ---------------------------------------------------------------------
+-- Index/overview pages (e.g. zeit.de/index, zeit.de/exklusive-zeit-artikel,
+-- a weekly zeit.de/<year>/<issue>/index) - scraped as a fallback for pages
+-- that aren't a feed, by picking out links that look like articles or
+-- like a further index/overview page to browse into.
+-- ---------------------------------------------------------------------
+
+local function resolveZeitUrl(href)
+    if href:sub(1, 2) == "//" then
+        return "https:" .. href
+    elseif href:sub(1, 1) == "/" then
+        return "https://www.zeit.de" .. href
+    end
+    return href
+end
+
+local function stripQueryAndFragment(url)
+    return url:match("^([^?#]+)") or url
+end
+
+--- Returns the deduplicated { href, text } links to zeit.de found in html.
+local function extractZeitLinks(html)
+    local seen, out = {}, {}
+    for attrs, text in html:gmatch("<a%s+([^>]-)>(.-)</a>") do
+        local href = attrs:match('href="([^"]*)"') or attrs:match("href='([^']*)'")
+        if href and href ~= "" and href:sub(1, 1) ~= "#" then
+            href = resolveZeitUrl(href)
+            if href:match("^https?://www%.zeit%.de") then
+                href = stripQueryAndFragment(href)
+                if not seen[href] then
+                    local clean_text = feedTrim((text:gsub("<[^>]+>", " "):gsub("%s+", " ")))
+                    if clean_text ~= "" then
+                        seen[href] = true
+                        table.insert(out, { href = href, text = clean_text })
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+--- Classifies a zeit.de URL as "article" (has a date/issue segment in its
+-- path, e.g. /politik/2025-09/... or /2025/38/...) or "index" (a further
+-- overview page to browse into, i.e. ends in /index). Anything else
+-- (navigation, footer, login/newsletter/etc. links) is ignored.
+local function classifyZeitLink(href)
+    if href:match("/index/?$") then
+        return "index"
+    end
+    if href:match("/%d%d%d%d%-%d%d/") or href:match("/%d%d%d%d/%d+/") then
+        return "article"
+    end
+    return nil
+end
+
+--- Scrapes an overview page into a list of { type, title, url } entries,
+-- type being "article" or "index".
+function ZeitApi:parseIndexHtml(html)
+    local out = {}
+    for _, link in ipairs(extractZeitLinks(html)) do
+        local kind = classifyZeitLink(link.href)
+        if kind then
+            table.insert(out, { type = kind, title = link.text, url = link.href })
+        end
+    end
+    return out
+end
+
+--- Fetches url and returns its entries as a list of { type, title, url }
+-- (type "article" or "index"), trying an RSS/Atom feed parse first and
+-- falling back to scraping it as an HTML overview page. Raises an error
+-- (to be caught with pcall by the caller) on network failure.
+function ZeitApi:fetchIndex(url, cookies)
+    local _content_type, content = self:loadPage(url, cookies, nil)
+    local feed_items = self:parseFeed(content)
+    if #feed_items > 0 then
+        local out = {}
+        for _, item in ipairs(feed_items) do
+            table.insert(out, { type = "article", title = item.title, url = item.link })
+        end
+        return out
+    end
+    return self:parseIndexHtml(content)
+end
+
+-- ---------------------------------------------------------------------
 -- HTML reduction (selecting the article body, dropping unwanted nodes)
 -- ---------------------------------------------------------------------
 

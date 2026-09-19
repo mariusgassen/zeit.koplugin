@@ -41,6 +41,36 @@ local function parseCommaSeparatedOption(opt)
     return result
 end
 
+--- Default "Name = URL" list of browsable ZEIT overview pages, offered
+-- until the user customizes it in the settings.
+local function defaultFeedSourcesText()
+    return table.concat({
+        _("Übersicht") .. " = https://www.zeit.de/index",
+        _("Nur ZEIT+") .. " = https://www.zeit.de/exklusive-zeit-artikel",
+        _("Ausgaben des Jahres") .. " = https://www.zeit.de/" .. os.date("%Y") .. "/index",
+    }, "\n")
+end
+
+--- Parses the "Name = URL" (one per line) feed_sources setting into an
+-- ordered list of { name, url }. A line without "=" uses the URL itself
+-- as its name. Blank lines and lines without a URL are skipped.
+local function parseFeedSources(text)
+    local sources = {}
+    for line in (text or ""):gmatch("[^\n]+") do
+        line = util.trim(line)
+        if line ~= "" then
+            local name, url = line:match("^(.-)%s*=%s*(https?://.+)$")
+            if not url then
+                name, url = nil, line:match("^(https?://.+)$")
+            end
+            if url then
+                table.insert(sources, { name = (name and name ~= "" and name) or url, url = url })
+            end
+        end
+    end
+    return sources
+end
+
 function ZeitPlus:loadSettings()
     if not ZeitPlus.settings then
         ZeitPlus.settings = LuaSettings:open(self.settings_file)
@@ -62,6 +92,7 @@ function ZeitPlus:onFlushSettings()
             include_images = self.include_images,
             article_selectors = self.article_selectors,
             unwanted_selectors = self.unwanted_selectors,
+            feed_sources = self.feed_sources,
         })
         self.zp_settings:flush()
         self.updated = nil
@@ -89,6 +120,10 @@ function ZeitPlus:init()
     end
     self.article_selectors = data.article_selectors
     self.unwanted_selectors = data.unwanted_selectors
+    self.feed_sources = data.feed_sources
+    if not self.feed_sources or self.feed_sources == "" then
+        self.feed_sources = defaultFeedSourcesText()
+    end
 
     self.ui.menu:registerToMainMenu(self)
 end
@@ -203,11 +238,30 @@ function ZeitPlus:fetchArticle(url)
     end
 end
 
+--- Downloads the already-complete EPUB at epub_url (e.g. ZEIT's own
+-- per-issue EPUB) as-is, without any HTML reduction. Meant to be called
+-- from inside a Trapper:wrap() context, like fetchArticle().
+function ZeitPlus:fetchDirectEpub(epub_url, title)
+    local UI = require("ui/trapper")
+    UI:info(_("Lade Ausgabe…"))
+
+    local safe_title = util.getSafeFilename(title or epub_url, nil, 100)
+    local file_path = ("%s%s_%s.epub"):format(self.download_dir, os.date("%y-%m-%d"), safe_title)
+    if lfs.attributes(file_path, "mode") == "file" then
+        UIManager:show(InfoMessage:new{ text = T(_("Bereits heruntergeladen:\n%1"), BD.filepath(file_path)) })
+        return
+    end
+
+    if ZeitApi:downloadFile(file_path, epub_url, self.cookies) then
+        UIManager:show(InfoMessage:new{ text = T(_("Ausgabe gespeichert:\n%1"), BD.filepath(file_path)) })
+    end
+end
+
 function ZeitPlus:downloadArticleUrl(url)
     url = util.trim(url or "")
     if url == "" then return end
     if not url:match("^https?://") then
-        UIManager:show(InfoMessage:new{ text = _("Bitte eine vollständige Artikel-URL eingeben (https://www.zeit.de/…).") })
+        UIManager:show(InfoMessage:new{ text = _("Bitte eine vollständige URL eingeben (Artikel, epaper.zeit.de-Ausgabe oder EPUB-Link).") })
         return
     end
     if not self:isLoggedIn() then
@@ -217,7 +271,20 @@ function ZeitPlus:downloadArticleUrl(url)
 
     local Trapper = require("ui/trapper")
     Trapper:wrap(function()
-        local ok, err = pcall(function() self:fetchArticle(url) end)
+        local ok, err = pcall(function()
+            if url:match("%.epub$") then
+                self:fetchDirectEpub(url, url:match("([^/]+)%.epub$"))
+            elseif url:match("^https?://epaper%.zeit%.de/") then
+                local _content_type, html = ZeitApi:loadPage(url, self.cookies, nil)
+                local epub_url = ZeitApi:extractEpubLink(html)
+                if not epub_url then
+                    error(_("Auf dieser Seite wurde kein EPUB-Download-Link gefunden."))
+                end
+                self:fetchDirectEpub(epub_url, url:match("diezeit/([%d%.]+)"))
+            else
+                self:fetchArticle(url)
+            end
+        end)
         if not ok and err ~= ZeitApi.dismissed_error_code then
             UIManager:show(InfoMessage:new{ text = T(_("Fehler beim Herunterladen:\n%1"), tostring(err)) })
         end
@@ -227,9 +294,9 @@ end
 function ZeitPlus:showAddArticleDialog()
     local dialog
     dialog = InputDialog:new{
-        title = _("Artikel-URL hinzufügen"),
+        title = _("Link hinzufügen"),
         input = "",
-        input_hint = "https://www.zeit.de/…",
+        input_hint = "https://www.zeit.de/… oder epaper.zeit.de/…",
         buttons = {
             {
                 {
@@ -251,6 +318,57 @@ function ZeitPlus:showAddArticleDialog()
     }
     UIManager:show(dialog)
     dialog:onShowKeyboard()
+end
+
+--- Builds the submenu entries for one overview page at url: fetches it
+-- (RSS/Atom feed or, as fallback, an HTML overview page like
+-- zeit.de/index) and returns one item per entry. An "article" entry
+-- downloads that article (keeping the submenu open so several articles
+-- can be picked in one go); an "index" entry (e.g. a weekly magazine
+-- issue) drills into that page the same way.
+function ZeitPlus:buildIndexMenu(url)
+    local ok, result = pcall(function() return ZeitApi:fetchIndex(url, self.cookies) end)
+    if not ok then
+        return { { text = T(_("Fehler beim Laden:\n%1"), tostring(result)), enabled = false } }
+    end
+    if #result == 0 then
+        return { { text = _("Keine Artikel gefunden."), enabled = false } }
+    end
+
+    local items = {}
+    for _, entry in ipairs(result) do
+        local title = util.htmlEntitiesToUtf8(entry.title)
+        if entry.type == "index" then
+            table.insert(items, {
+                text = title,
+                sub_item_table_func = function() return self:buildIndexMenu(entry.url) end,
+            })
+        else
+            table.insert(items, {
+                text = title,
+                keep_menu_open = true,
+                callback = function() self:downloadArticleUrl(entry.url) end,
+            })
+        end
+    end
+    return items
+end
+
+--- Builds the top-level "Stöbern" submenu: one entry per configured
+-- source, each drilling into buildIndexMenu().
+function ZeitPlus:buildSourceMenu()
+    local sources = parseFeedSources(self.feed_sources)
+    if #sources == 0 then
+        return { { text = _("Bitte zuerst Quellen in den Einstellungen eintragen."), enabled = false } }
+    end
+    local items = {}
+    for _, source in ipairs(sources) do
+        table.insert(items, {
+            text = source.name,
+            sub_item_table_func = function() return self:buildIndexMenu(source.url) end,
+        })
+    end
+    return items
 end
 
 function ZeitPlus:setDownloadDirectory(touchmenu_instance)
@@ -300,6 +418,32 @@ local function selectorInputDialog(title, hint, current, on_save)
     dialog:onShowKeyboard()
 end
 
+--- Like selectorInputDialog(), but for multi-line content: Enter must stay
+-- available to insert a newline, so unlike selectorInputDialog() no button
+-- is marked is_enter_default and Save has to be tapped explicitly.
+local function multilineInputDialog(title, hint, current, on_save)
+    local dialog
+    dialog = InputDialog:new{
+        title = title,
+        input = current or "",
+        input_hint = hint,
+        buttons = {
+            {
+                { text = _("Abbrechen"), id = "close", callback = function() UIManager:close(dialog) end },
+                {
+                    text = _("Speichern"),
+                    callback = function()
+                        on_save(dialog:getInputText())
+                        UIManager:close(dialog)
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
 function ZeitPlus:addToMainMenu(menu_items)
     menu_items.zeitplus = {
         text = _("ZEIT+"),
@@ -322,10 +466,16 @@ function ZeitPlus:addToMainMenu(menu_items)
                 separator = true,
             },
             {
-                text = _("Artikel-URL hinzufügen"),
+                text = _("Link hinzufügen"),
                 keep_menu_open = true,
                 callback = function()
                     self:showAddArticleDialog()
+                end,
+            },
+            {
+                text = _("Stöbern"),
+                sub_item_table_func = function()
+                    return self:buildSourceMenu()
                 end,
             },
             {
@@ -352,6 +502,23 @@ function ZeitPlus:addToMainMenu(menu_items)
                         callback = function()
                             self.include_images = not self.include_images
                             self.updated = true
+                        end,
+                    },
+                    {
+                        text = _("Quellen zum Stöbern anpassen"),
+                        keep_menu_open = true,
+                        callback = function()
+                            multilineInputDialog(
+                                _("Quellen (eine pro Zeile: Name = URL)"),
+                                "Übersicht = https://www.zeit.de/index",
+                                self.feed_sources,
+                                function(text)
+                                    text = util.trim(text)
+                                    self.feed_sources = text ~= "" and text or defaultFeedSourcesText()
+                                    self.updated = true
+                                    self:onFlushSettings()
+                                end
+                            )
                         end,
                     },
                     {
