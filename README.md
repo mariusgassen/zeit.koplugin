@@ -43,7 +43,10 @@ zu teilen.
 
 ## Nutzung
 
-- **ZEIT+ → Nicht angemeldet** antippen → E-Mail und Passwort eingeben.
+- **ZEIT+ → Nicht angemeldet** antippen → E-Mail und Passwort eingeben
+  (nur falls der automatische Login noch funktioniert, siehe unten).
+- **ZEIT+ → Session-Cookies laden (Datei)** → lädt die Session-Cookies aus
+  der Datei `zeitplus_cookies.txt` (empfohlen, siehe unten).
 - **ZEIT+ → Link hinzufügen** → Artikel-URL, `epaper.zeit.de`-Ausgabenlink
   oder direkten EPUB-Link einfügen → Download läuft, EPUB landet im
   eingestellten Zielordner (Standard: `<koreader-daten>/zeitplus/`).
@@ -54,6 +57,44 @@ zu teilen.
 - **ZEIT+ → Einstellungen** erlaubt das Ändern des Zielordners, der
   Stöbern-Quellen, das Ein-/Ausschalten von Bildern sowie das Anpassen der
   CSS-Selektoren zur Artikel-Erkennung (siehe unten).
+
+## Hinweis zum Login: Session-Cookies per SSH einfügen (empfohlen)
+
+Der automatische E-Mail/Passwort-Login des Plugins funktioniert derzeit
+**nicht mehr**: ZEIT hat die Anmeldung auf ein OpenID-Connect-/Keycloak-SSO
+(`login.zeit.de`) umgestellt und blockt zusätzlich automatisierte Logins mit
+einem „Bitte bestätigen Sie, dass Sie kein Roboter sind“-Gate. E-Mail und
+Passwort sind also nicht das Problem – der Login-Abgriff aus einem Skript
+heraus ist es.
+
+Der zuverlässige Weg ist daher, **einmal im Browser anzumelden und die
+Session-Cookies ins Plugin zu legen** – ganz ohne Tippen auf dem E-Reader:
+
+1. Auf dem Gerät KOReaders **SSH-Server** aktivieren (Menü → Hilfe →
+   „SSH-Server starten“) – du bekommst dann eine IP sowie
+   Login/Passwort angezeigt.
+2. Am Rechner verbinden: `ssh root@<IP>` (Passwort aus dem KOReader-Menü).
+3. Im Browser (am Rechner oder Handy) unter `https://www.zeit.de` anmelden.
+   Dann Entwicklertools (F12) → **Application → Cookies → www.zeit.de**
+   öffnen und die Werte der beiden Cookies **`zeit_sso_201501`** und
+   **`zeit_sso_session_201501`** kopieren.
+4. Auf dem Reader die Datei `koreader/settings/zeitplus_cookies.txt`
+   öffnen (fällt der Menüpunkt im Plugin an, wird eine Vorlage angelegt)
+   – z. B. mit `vi` oder besser per `scp` vom Rechner:
+
+   ```
+   scp zeitplus_cookies.txt root@<IP>:/mnt/us/koreader/settings/
+   ```
+
+   Format: eine `name=value`-Zeile pro Cookie (leere Zeilen und `#`-Kommentare
+   werden ignoriert).
+5. Im Plugin **ZEIT+ → Session-Cookies laden (Datei)** antippen. Das Menü
+   zeigt danach „Angemeldet als: <deine E-Mail>“.
+
+Haltbarkeit: Das Cookie `zeit_sso_201501` ist ca. **1 Jahr** gültig, das
+Session-Cookie `zeit_sso_session_201501` nur **etwa 3 Tage**. Läuft es ab,
+landen Artikel wieder hinter der Bezahlschranke; dann Schritt 3–5 einfach
+wiederholen.
 
 ## Hinweis zu den Stöbern-Quellen
 

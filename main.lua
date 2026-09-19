@@ -71,6 +71,75 @@ local function parseFeedSources(text)
     return sources
 end
 
+--- Parses a cookies text (e.g. pasted/copied from a browser) into the
+-- cookie list the plugin uses. Accepts one "name=value" per line, a
+-- semicolon-separated list, or a browser table row ("name<TAB>value ...").
+-- Lines starting with "#" are comments; empty values are ignored.
+local function parseCookies(text)
+    local cookies = {}
+    for line in (text or ""):gmatch("[^\r\n]+") do
+        for seg in (line .. ";"):gmatch("([^;]*);") do
+            seg = util.trim(seg)
+            if seg ~= "" and seg:sub(1, 1) ~= "#" then
+                local name, value = seg:match("^(.-)%s*=%s*(.*)$")
+                if not value then
+                    name, value = seg:match("^(%S+)%s+(%S.*)$")
+                end
+                if value then
+                    name = util.trim(name or "")
+                    value = util.trim(value)
+                    value = value:gsub("^\"(.*)\"$", "%1")
+                    if name ~= "" and value ~= "" and value ~= "PASTE_HERE" then
+                        cookies[#cookies + 1] = { name = name, value = value }
+                    end
+                end
+            end
+        end
+    end
+    return cookies
+end
+
+--- Decodes a base64url string to ASCII bytes, or returns nil on garbage.
+local function b64urlDecode(s)
+    local B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    s = s:gsub("-", "+"):gsub("_", "/")
+    local out = {}
+    local val, bits = 0, 0
+    for i = 1, #s do
+        local char = s:sub(i, i)
+        if char == "=" then break end
+        local b = B64_CHARS:find(char, 1, true)
+        if not b then return nil end
+        b = b - 1
+        val = val * 64 + b
+        bits = bits + 6
+        if bits >= 8 then
+            bits = bits - 8
+            out[#out + 1] = string.char(math.floor(val / (2 ^ bits)) % 256)
+            val = val % (2 ^ bits)
+        end
+    end
+    return table.concat(out)
+end
+
+--- Best-effort: reads the "email" claim from ZEIT's session cookie (a JWT)
+-- so the menu can show who is logged in even without a stored username.
+local function sessionEmailFromCookies(cookies)
+    for _, c in ipairs(cookies or {}) do
+        if c.name == "zeit_sso_session_201501" then
+            local payload = tostring(c.value or ""):match("^[^.]*%.([^.]*)%.")
+            if payload then
+                local decoded = b64urlDecode(payload)
+                if decoded then
+                    local email = decoded:match('"email"%s*:%s*"([^"]+)"')
+                    if email then return email end
+                end
+            end
+        end
+    end
+    return nil
+end
+
 function ZeitPlus:loadSettings()
     if not ZeitPlus.settings then
         ZeitPlus.settings = LuaSettings:open(self.settings_file)
@@ -130,6 +199,60 @@ end
 
 function ZeitPlus:isLoggedIn()
     return self.cookies ~= nil and #self.cookies > 0
+end
+
+--- Path of the plain-text cookie file the user fills via SSH.
+function ZeitPlus:cookiesFilePath()
+    return DataStorage:getSettingsDir() .. "/zeitplus_cookies.txt"
+end
+
+--- Creates a template cookie file if none exists yet.
+function ZeitPlus:writeCookiesTemplate()
+    local path = self:cookiesFilePath()
+    if lfs.attributes(path, "mode") then return end
+    local template = [[# ZEIT+ Session-Cookies - eine Cookie pro Zeile im Format: name=value
+# So bekommst du die Werte:
+#   1. www.zeit.de im Browser offnen und anmelden
+#   2. Entwicklertools (F12) -> Application -> Cookies -> www.zeit.de
+#   3. Werte der beiden Cookies hier eintragen (leer lassen = nicht senden).
+zeit_sso_201501=
+zeit_sso_session_201501=
+]]
+    local f = io.open(path, "w")
+    if f then
+        f:write(template)
+        f:close()
+    end
+end
+
+--- Loads session cookies from the plain-text cookie file (editable via
+-- SSH) and persists them, replacing any existing login. Shows the result
+-- as an InfoMessage. Returns true on success.
+function ZeitPlus:loadCookiesFromFile()
+    local path = self:cookiesFilePath()
+    local f = io.open(path, "r")
+    if not f then
+        self:writeCookiesTemplate()
+        UIManager:show(InfoMessage:new{ text = T(_("Keine Cookie-Datei gefunden.\nEine Vorlage wurde angelegt. Fülle sie mit deinen Session-Cookies und lade sie dann erneut:\n%1"), BD.filepath(path)) })
+        return false
+    end
+    local content = f:read("*a")
+    f:close()
+    local cookies = parseCookies(content)
+    if #cookies == 0 then
+        UIManager:show(InfoMessage:new{ text = T(_("Keine gültigen Cookies in der Datei gefunden.\nFormat: eine name=value-Zeile pro Cookie.\n\nDatei:\n%1"), BD.filepath(path)) })
+        return false
+    end
+    self.cookies = cookies
+    self.updated = true
+    self:onFlushSettings()
+    local email = sessionEmailFromCookies(cookies) or self.username
+    if email then
+        UIManager:show(InfoMessage:new{ text = T(_("Cookies geladen. Angemeldet als: %1"), email) })
+    else
+        UIManager:show(InfoMessage:new{ text = _("Cookies geladen. Angemeldet.") })
+    end
+    return true
 end
 
 --- Performs the login HTTP call and persists the resulting cookies.
@@ -451,7 +574,7 @@ function ZeitPlus:addToMainMenu(menu_items)
             {
                 text_func = function()
                     if self:isLoggedIn() then
-                        return T(_("Angemeldet als: %1"), self.username or "?")
+                        return T(_("Angemeldet als: %1"), self.username or sessionEmailFromCookies(self.cookies) or "?")
                     end
                     return _("Nicht angemeldet")
                 end,
@@ -461,6 +584,15 @@ function ZeitPlus:addToMainMenu(menu_items)
                         self:logout()
                     else
                         self:showLoginDialog()
+                    end
+                end,
+            },
+            {
+                text = _("Session-Cookies laden (Datei)"),
+                keep_menu_open = true,
+                callback = function(touchmenu_instance)
+                    if self:loadCookiesFromFile() and touchmenu_instance then
+                        touchmenu_instance:updateItems()
                     end
                 end,
                 separator = true,
