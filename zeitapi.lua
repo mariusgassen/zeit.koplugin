@@ -1,0 +1,599 @@
+--[[--
+HTTP/login/EPUB backend for the ZEIT+ plugin.
+
+Handles authenticating against a ZEIT+ account (meine.zeit.de), fetching an
+article page with the resulting session cookies (so ZEIT+ content is
+unlocked instead of showing the paywall teaser), and packaging the article
+(with its images) into an EPUB that KOReader can open directly.
+
+The HTTP/EPUB plumbing (cookie parsing, image fetching, EPUB assembly) is
+adapted from KOReader's own newsdownloader.koplugin, which already
+implements exactly this "login with cookies, fetch HTML, build EPUB"
+pattern against KOReader's bundled libraries (LuaSocket, ffi/archiver,
+htmlparser).
+
+@module koplugin.zeitplus.zeitapi
+]]
+
+local ffiutil = require("ffi/util")
+local http = require("socket.http")
+local httpasync = require("httpasync")
+local lfs = require("libs/libkoreader-lfs")
+local logger = require("logger")
+local ltn12 = require("ltn12")
+local socket = require("socket")
+local socket_url = require("socket.url")
+local socketutil = require("socketutil")
+local time = require("ui/time")
+local util = require("util")
+local _ = require("gettext")
+local T = ffiutil.template
+
+local ZeitApi = {
+    -- Can be set so HTTP requests are done under Trapper and are
+    -- interruptible/show progress. See setTrapWidget().
+    trap_widget = nil,
+    dismissed_error_code = "Interrupted by user",
+
+    login_url = "https://meine.zeit.de/anmelden?url=https%3A%2F%2Fwww.zeit.de%2Findex&entry_service=sonstige",
+
+    -- Best-effort default selectors for the article body. ZEIT's markup
+    -- can change over time; if extraction stops working, override these
+    -- via the plugin settings (found by inspecting a logged-in article
+    -- page in a desktop browser).
+    default_article_selectors = {
+        "article",
+        "div.article-page",
+        "div.article-body",
+        "div[itemprop='articleBody']",
+        "main",
+        "div#main",
+        "div#content",
+    },
+    default_unwanted_selectors = {
+        "div.article__social",
+        "div.article-header__service",
+        "div.ad-container",
+        "div.newsletter-signup",
+        "div.comment-section",
+        "aside",
+        "figure.is-type-video",
+        "div.fluid-width-video-wrapper",
+        "div.youtube-wrap",
+    },
+    -- Strings that, if present, suggest the fetched page is still showing
+    -- the paywall teaser rather than the full ZEIT+ article (i.e. the
+    -- login session isn't unlocking premium content).
+    paywall_markers = {
+        "zeit%-plus%-cta",
+        "Diesen Artikel weiterlesen",
+        "Sie haben schon ein Abo",
+        "paywall",
+    },
+}
+
+-- ---------------------------------------------------------------------
+-- Cookie helpers
+-- From https://github.com/lunarmodules/luasocket/blob/master/samples/cookie.lua
+-- ---------------------------------------------------------------------
+local token_class = '[^%c%s%(%)%<%>%@%,%;%:%\\%"%/%[%]%?%=%{%}]'
+
+local function unquote(t, quoted)
+    local n = string.match(t, "%$(%d+)$")
+    if n then n = tonumber(n) end
+    if quoted[n] then return quoted[n]
+    else return t end
+end
+
+local function parse_set_cookie(c, quoted, cookie_table)
+    c = c .. ";$last=last;"
+    local _unused, _unused2, n, v, i = string.find(c, "(" .. token_class ..
+        "+)%s*=%s*(.-)%s*;%s*()")
+    local cookie = {
+        name = n,
+        value = unquote(v, quoted),
+        attributes = {},
+    }
+    while true do
+        _unused, _unused2, n, v, i = string.find(c, "(" .. token_class ..
+            "+)%s*=?%s*(.-)%s*;%s*()", i)
+        if not n or n == "$last" then break end
+        cookie.attributes[#cookie.attributes + 1] = { name = n, value = unquote(v, quoted) }
+    end
+    cookie_table[#cookie_table + 1] = cookie
+end
+
+local function split_set_cookie(s, cookie_table)
+    cookie_table = cookie_table or {}
+    if not s or s == "" then return cookie_table end
+    local quoted = {}
+    s = string.gsub(s, '"(.-)"', function(q)
+        quoted[#quoted + 1] = q
+        return "$" .. #quoted
+    end)
+    s = s .. ",$last="
+    local i = 1
+    while true do
+        local _unused, _unused2, cookie, next_token
+        _unused, _unused2, cookie, i, next_token = string.find(s, "(.-)%s*%,%s*()(" ..
+            token_class .. "+)%s*=", i)
+        if not next_token then break end
+        parse_set_cookie(cookie, quoted, cookie_table)
+        if next_token == "$last" then break end
+    end
+    return cookie_table
+end
+
+local function quote(s)
+    if string.find(s, "[ %,%;]") then return '"' .. s .. '"'
+    else return s end
+end
+
+local _empty = {}
+local function build_cookie_header(cookies)
+    local s = ""
+    for i, v in ipairs(cookies or _empty) do
+        if v.name then
+            s = s .. v.name
+            if v.value and v.value ~= "" then
+                s = s .. "=" .. quote(v.value)
+            end
+        end
+        if i < #cookies then s = s .. "; " end
+    end
+    return s
+end
+
+-- ---------------------------------------------------------------------
+-- Raw HTTP
+-- ---------------------------------------------------------------------
+
+local DEFAULT_HEADERS = {
+    ["user-agent"] = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 KOReader-ZeitPlus",
+    ["accept-language"] = "de-DE,de;q=0.9",
+}
+
+local function mergedHeaders(cookies, extra_headers)
+    local h = { ["cookie"] = build_cookie_header(cookies) }
+    for k, v in pairs(DEFAULT_HEADERS) do h[k] = v end
+    if extra_headers then
+        for k, v in pairs(extra_headers) do h[k] = v end
+    end
+    return h
+end
+
+--- Performs a GET request and returns (ok, content_type, content_or_error, response_headers)
+local function getUrlContent(url, cookies, timeout, maxtime, extra_headers)
+    local parsed_url = socket_url.parse(url)
+    if parsed_url.path then
+        parsed_url.path = util.urlEncode(parsed_url.path, "/%%")
+        url = socket_url.build(parsed_url)
+    end
+
+    if not timeout then timeout = 10 end
+    local sink = {}
+    socketutil:set_timeout(timeout, maxtime or 30)
+    local request = {
+        url = url,
+        method = "GET",
+        sink = maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink),
+        headers = mergedHeaders(cookies, extra_headers),
+    }
+    local code, headers, status = socket.skip(1, http.request(request))
+    socketutil:reset_timeout()
+    local content = table.concat(sink)
+
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SSL_HANDSHAKE_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        logger.warn("ZeitApi: request interrupted:", status or code)
+        return false, nil, code
+    end
+    if headers == nil then
+        logger.warn("ZeitApi: no HTTP headers:", status or code or "network unreachable")
+        return false, nil, _("Network or remote server unavailable")
+    end
+    if headers["content-length"] then
+        local content_length = tonumber(headers["content-length"])
+        if content_length and #content ~= content_length then
+            return false, nil, _("Incomplete content received")
+        end
+    end
+    if code >= 400 then
+        logger.warn("ZeitApi: HTTP error:", status or code)
+        return false, nil, tostring(status or code)
+    end
+
+    return true, headers["content-type"], content, headers
+end
+
+--- Logs into meine.zeit.de with the given credentials.
+-- Returns (ok, cookies_or_error_message).
+function ZeitApi:login(username, password)
+    local body = "username=" .. util.urlEncode(username) .. "&password=" .. util.urlEncode(password)
+    socketutil:set_timeout(10, 30)
+    local request = {
+        method = "POST",
+        url = self.login_url,
+        headers = (function()
+            local h = mergedHeaders(nil, { ["content-type"] = "application/x-www-form-urlencoded" })
+            h["content-length"] = tostring(#body)
+            return h
+        end)(),
+        source = ltn12.source.string(body),
+        sink = ltn12.sink.table({}),
+    }
+    local code, headers = socket.skip(1, http.request(request))
+    socketutil:reset_timeout()
+
+    if headers == nil then
+        return false, _("Network or remote server unavailable")
+    end
+    local cookies = split_set_cookie(headers["set-cookie"], {})
+    if #cookies == 0 then
+        return false, _("Login failed: server did not return a session. Please check your ZEIT+ email and password.")
+    end
+    logger.dbg("ZeitApi:login code:", code, "cookies:", cookies)
+    return true, cookies
+end
+
+function ZeitApi:setTrapWidget(trap_widget)
+    self.trap_widget = trap_widget
+end
+
+function ZeitApi:resetTrapWidget()
+    self.trap_widget = nil
+end
+
+--- Fetches a page, using Trapper (interruptible, shows progress) if a trap
+-- widget has been set, otherwise doing a plain blocking request.
+function ZeitApi:loadPage(url, cookies, extra_headers)
+    local completed, success, content_type, content
+    if self.trap_widget then
+        local Trapper = require("ui/trapper")
+        completed, success, content_type, content = Trapper:dismissableRunInSubprocess(function()
+            return getUrlContent(url, cookies, 30, 60, extra_headers)
+        end, self.trap_widget)
+        if not completed then
+            error(self.dismissed_error_code)
+        end
+    else
+        success, content_type, content = getUrlContent(url, cookies, 10, 60, extra_headers)
+    end
+    if not success then
+        error(content)
+    end
+    return content_type, content
+end
+
+--- Returns true if the given article HTML looks like it's still showing
+-- the paywall teaser rather than the unlocked ZEIT+ article.
+function ZeitApi:isLikelyPaywalled(html)
+    for _, marker in ipairs(self.paywall_markers) do
+        if html:find(marker) then
+            return true
+        end
+    end
+    return false
+end
+
+local function extractMeta(html, property)
+    local pattern1 = '<meta[^>]-property="' .. property .. '"[^>]-content="([^"]*)"'
+    local pattern2 = '<meta[^>]-content="([^"]*)"[^>]-property="' .. property .. '"'
+    return html:match(pattern1) or html:match(pattern2)
+end
+
+local function extractMetaName(html, name)
+    local pattern1 = '<meta[^>]-name="' .. name .. '"[^>]-content="([^"]*)"'
+    local pattern2 = '<meta[^>]-content="([^"]*)"[^>]-name="' .. name .. '"'
+    return html:match(pattern1) or html:match(pattern2)
+end
+
+--- Extracts a small set of metadata (title, author, published date) from
+-- the raw page head, before the HTML gets reduced to the article body.
+function ZeitApi:extractArticleMeta(html)
+    return {
+        title = extractMeta(html, "og:title") or html:match([[<title[^>]*>(.-)</title>]]),
+        author = extractMetaName(html, "author"),
+        published = extractMeta(html, "article:published_time"),
+    }
+end
+
+-- ---------------------------------------------------------------------
+-- HTML reduction (selecting the article body, dropping unwanted nodes)
+-- ---------------------------------------------------------------------
+
+local function userOrDefault(user, default)
+    if type(user) == "table" and next(user) ~= nil then
+        return user
+    end
+    return default
+end
+
+local function selectMatchingNode(root_node, user_selectors, default_selectors)
+    local selectors = userOrDefault(user_selectors, default_selectors)
+    for _, selector in ipairs(selectors) do
+        local ok, nodes = pcall(function() return root_node:select(selector) end)
+        if ok and nodes then
+            for _, node in ipairs(nodes) do
+                if node:getcontent() then
+                    return node
+                end
+            end
+        end
+    end
+    return root_node
+end
+
+local function removeSubstring(str, substr)
+    local iter = 1
+    local i, j
+    repeat
+        i, j = string.find(str, substr, iter, true)
+        if i then
+            str = string.sub(str, 1, i - 1) .. string.sub(str, j + 1, -1)
+            iter = i
+        end
+    until not i
+    return str
+end
+
+local function removeUnwantedNodes(wanted_node, user_selectors, default_selectors)
+    local selectors = userOrDefault(user_selectors, default_selectors)
+    local node_content = wanted_node:getcontent()
+    for _, selector in ipairs(selectors) do
+        local ok, unwanted_nodes = pcall(function() return wanted_node:select(selector) end)
+        if ok and unwanted_nodes then
+            for _, unwanted_node in ipairs(unwanted_nodes) do
+                node_content = removeSubstring(node_content, unwanted_node:gettext())
+            end
+        end
+    end
+    return node_content
+end
+
+function ZeitApi:reduceHTML(input_html, article_selectors, unwanted_selectors)
+    local htmlparser = require("htmlparser")
+    local root = htmlparser.parse(input_html, 5000)
+    local wanted_node = selectMatchingNode(root, article_selectors, self.default_article_selectors)
+    local cleaned_inner_html = removeUnwantedNodes(wanted_node, unwanted_selectors, self.default_unwanted_selectors)
+    return "<!DOCTYPE html><html><head></head><body>" .. cleaned_inner_html .. "</body></html>"
+end
+
+-- ---------------------------------------------------------------------
+-- EPUB assembly (adapted from newsdownloader.koplugin/epubdownloadbackend.lua)
+-- ---------------------------------------------------------------------
+
+local ext_to_mimetype = {
+    png = "image/png",
+    jpg = "image/jpeg",
+    jpeg = "image/jpeg",
+    gif = "image/gif",
+    svg = "image/svg+xml",
+    webp = "image/webp",
+}
+
+local MAX_CONCURRENT_DOWNLOADS = 6
+
+--- Builds an EPUB at epub_path from the article HTML fetched from url.
+-- meta: { title, author, published } as returned by extractArticleMeta().
+function ZeitApi:createEpub(epub_path, html, url, meta, include_images, message, article_selectors, unwanted_selectors)
+    local UI = require("ui/trapper")
+    local base_url = socket_url.parse(url)
+
+    local page_title = (meta and meta.title) or html:match([[<title[^>]*>(.-)</title>]]) or url
+    page_title = util.htmlEntitiesToUtf8(page_title)
+
+    local cre = require("libs/libkoreader-cre")
+    local body_html = self:reduceHTML(html, article_selectors, unwanted_selectors)
+
+    -- Prepend a small header with title/byline/date so it reads naturally
+    -- as part of the article.
+    local header_parts = { string.format("<h1>%s</h1>", page_title) }
+    if meta and (meta.author or meta.published) then
+        local byline_bits = {}
+        if meta.author then table.insert(byline_bits, meta.author) end
+        if meta.published then table.insert(byline_bits, meta.published:sub(1, 10)) end
+        table.insert(header_parts, string.format("<p><em>%s</em></p>", table.concat(byline_bits, " – ")))
+    end
+    body_html = body_html:gsub("<body>", "<body>" .. table.concat(header_parts))
+
+    body_html = cre.getBalancedHTML(body_html, 0x0)
+
+    local images = {}
+    local seen_images = {}
+    local imagenum = 1
+    local cover_imgid = nil
+
+    local function isRelative(url_string)
+        local parsed = socket_url.parse(url_string)
+        return parsed and parsed.scheme == nil
+    end
+
+    local processImg = function(img_tag)
+        local src = img_tag:match([[src="([^"]*)"]])
+        if not src or src == "" or src:sub(1, 5) == "data:" then
+            return nil
+        end
+        if src:sub(1, 2) == "//" then
+            src = "https:" .. src
+        elseif isRelative(src) then
+            src = socket_url.absolute(base_url, src)
+        end
+        local cur_image = seen_images[src]
+        if not cur_image then
+            local src_ext = src:find("?") and src:match("(.-)%?") or src
+            local ext = (src_ext:match(".*%.(%S%S%S?%S?%S?)$") or ""):lower()
+            local imgid = string.format("img%05d", imagenum)
+            local imgpath = ext ~= "" and string.format("images/%s.%s", imgid, ext) or string.format("images/%s", imgid)
+            local width = tonumber(img_tag:match([[width="([^"]*)"]]))
+            local height = tonumber(img_tag:match([[height="([^"]*)"]]))
+            cur_image = {
+                imgid = imgid,
+                imgpath = imgpath,
+                src = src,
+                mimetype = ext_to_mimetype[ext] or "",
+                width = width,
+                height = height,
+            }
+            table.insert(images, cur_image)
+            seen_images[src] = cur_image
+            if not cover_imgid and width and width > 50 and height and height > 50 then
+                cover_imgid = imgid
+            end
+            imagenum = imagenum + 1
+        end
+        local style_props = {}
+        if cur_image.width then table.insert(style_props, string.format("width: %spx", cur_image.width)) end
+        if cur_image.height then table.insert(style_props, string.format("height: %spx", cur_image.height)) end
+        return string.format([[<img src="%s" style="%s" alt=""/>]], cur_image.imgpath, table.concat(style_props, "; "))
+    end
+    body_html = body_html:gsub("(<%s*img [^>]*>)", processImg)
+
+    if not include_images then
+        body_html = body_html:gsub("<%s*img [^>]*>", "")
+    end
+
+    UI:info(T(_("%1\n\nErstelle EPUB…"), message))
+    local Archiver = require("ffi/archiver")
+    local epub = Archiver.Writer:new{}
+    local epub_path_tmp = epub_path .. ".tmp"
+    if not epub:open(epub_path_tmp, "epub") then
+        return false
+    end
+
+    local mtime = os.time()
+
+    epub:setZipCompression("store")
+    epub:addFileFromMemory("mimetype", "application/epub+zip", mtime)
+    epub:setZipCompression("deflate")
+
+    epub:addFileFromMemory("META-INF/container.xml", [[
+<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>]], mtime)
+
+    local content_opf_parts = {}
+    local meta_cover = "<!-- no cover image -->"
+    if include_images and cover_imgid then
+        meta_cover = string.format([[<meta name="cover" content="%s"/>]], cover_imgid)
+    end
+    local dc_creator = ""
+    if meta and meta.author then
+        dc_creator = string.format("<dc:creator>%s</dc:creator>", meta.author)
+    end
+    table.insert(content_opf_parts, string.format([[
+<?xml version='1.0' encoding='utf-8'?>
+<package xmlns="http://www.idpf.org/2007/opf"
+        xmlns:dc="http://purl.org/dc/elements/1.1/"
+        unique-identifier="bookid" version="2.0">
+  <metadata>
+    <dc:title>%s</dc:title>
+    <dc:publisher>ZEIT+ (via KOReader)</dc:publisher>
+    %s
+    %s
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="content" href="content.html" media-type="application/xhtml+xml"/>
+    <item id="css" href="stylesheet.css" media-type="text/css"/>
+]], page_title, dc_creator, meta_cover))
+    if include_images then
+        for _, img in ipairs(images) do
+            table.insert(content_opf_parts, string.format([[    <item id="%s" href="%s" media-type="%s"/>%s]], img.imgid, img.imgpath, img.mimetype, "\n"))
+        end
+    end
+    table.insert(content_opf_parts, [[
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="content"/>
+  </spine>
+</package>
+]])
+    epub:addFileFromMemory("OEBPS/content.opf", table.concat(content_opf_parts), mtime)
+
+    epub:addFileFromMemory("OEBPS/stylesheet.css", "/* Empty */\n", mtime)
+
+    epub:addFileFromMemory("OEBPS/toc.ncx", string.format([[
+<?xml version='1.0' encoding='utf-8'?>
+<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head>
+    <meta name="dtb:uid" content="zeitplus"/>
+    <meta name="dtb:depth" content="0"/>
+    <meta name="dtb:totalPageCount" content="0"/>
+    <meta name="dtb:maxPageNumber" content="0"/>
+  </head>
+  <docTitle><text>%s</text></docTitle>
+  <navMap>
+    <navPoint id="navpoint-1" playOrder="1"><navLabel><text>%s</text></navLabel><content src="content.html"/></navPoint>
+  </navMap>
+</ncx>
+]], page_title, page_title), mtime)
+
+    epub:addFileFromMemory("OEBPS/content.html", body_html, mtime)
+
+    collectgarbage()
+    collectgarbage()
+
+    local cancelled = false
+    if include_images and #images > 0 then
+        local before_images_time = time.now()
+        local time_prev = before_images_time
+        local failed_images = {}
+        local tasks = {}
+        for inum, img in ipairs(images) do
+            table.insert(tasks, { inum = inum, img = img })
+        end
+        local download_completed = httpasync.fetch_many(tasks, {
+            concurrency = MAX_CONCURRENT_DOWNLOADS,
+            get_url = function(task) return task.img.src end,
+            on_success = function(task, content)
+                local no_compression = task.img.mimetype ~= "image/svg+xml"
+                epub:addFileFromMemory("OEBPS/" .. task.img.imgpath, content, no_compression, mtime)
+            end,
+            on_failure = function(task, err)
+                logger.info("ZeitApi: failed fetching image:", task.img.src, err)
+                table.insert(failed_images, task.inum)
+            end,
+            on_progress = function(completed, total)
+                if time.to_ms(time.since(time_prev)) > 1000 then
+                    time_prev = time.now()
+                    local errors = #failed_images
+                    local prefix = message and message ~= "" and message .. "\n\n" or ""
+                    local go_on
+                    if errors > 0 then
+                        go_on = UI:info(prefix .. T(_("Lade Bilder… %1 / %2 (%3 Fehler)"), completed, total, errors), completed >= 1)
+                    else
+                        go_on = UI:info(prefix .. T(_("Lade Bilder… %1 / %2"), completed, total), completed >= 1)
+                    end
+                    if not go_on then return false end
+                end
+                return true
+            end,
+        })
+        if not download_completed then cancelled = true end
+    end
+
+    if cancelled then
+        UI:info(_("Abgebrochen. Räume auf…"))
+    else
+        UI:info(T(_("%1\n\nEPUB wird gepackt…"), message))
+    end
+    epub:close()
+
+    if cancelled then
+        if lfs.attributes(epub_path_tmp, "mode") == "file" then
+            os.remove(epub_path_tmp)
+        end
+        return false
+    end
+
+    os.rename(epub_path_tmp, epub_path)
+    collectgarbage()
+    collectgarbage()
+    return true
+end
+
+return ZeitApi
