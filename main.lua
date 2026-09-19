@@ -62,6 +62,7 @@ function ZeitPlus:onFlushSettings()
             include_images = self.include_images,
             article_selectors = self.article_selectors,
             unwanted_selectors = self.unwanted_selectors,
+            feed_url = self.feed_url,
         })
         self.zp_settings:flush()
         self.updated = nil
@@ -89,6 +90,10 @@ function ZeitPlus:init()
     end
     self.article_selectors = data.article_selectors
     self.unwanted_selectors = data.unwanted_selectors
+    self.feed_url = data.feed_url
+    if not self.feed_url or self.feed_url == "" then
+        self.feed_url = ZeitApi.default_feed_url
+    end
 
     self.ui.menu:registerToMainMenu(self)
 end
@@ -253,6 +258,35 @@ function ZeitPlus:showAddArticleDialog()
     dialog:onShowKeyboard()
 end
 
+--- Builds the "Artikel aus Feed" submenu entries: fetches and parses the
+-- configured feed, then returns one tappable item per article, which
+-- downloads that article (keeping the submenu open so several articles
+-- can be picked in one go).
+function ZeitPlus:buildFeedMenu()
+    local feed_url = util.trim(self.feed_url or "")
+    if feed_url == "" then
+        return { { text = _("Bitte zuerst eine Feed-URL in den Einstellungen eintragen."), enabled = false } }
+    end
+
+    local ok, result = pcall(function() return ZeitApi:fetchFeed(feed_url, self.cookies) end)
+    if not ok then
+        return { { text = T(_("Fehler beim Laden des Feeds:\n%1"), tostring(result)), enabled = false } }
+    end
+    if #result == 0 then
+        return { { text = _("Feed enthält keine Artikel (oder Format wird nicht erkannt)."), enabled = false } }
+    end
+
+    local items = {}
+    for _, entry in ipairs(result) do
+        table.insert(items, {
+            text = util.htmlEntitiesToUtf8(entry.title),
+            keep_menu_open = true,
+            callback = function() self:downloadArticleUrl(entry.link) end,
+        })
+    end
+    return items
+end
+
 function ZeitPlus:setDownloadDirectory(touchmenu_instance)
     require("ui/downloadmgr"):new{
         onConfirm = function(path)
@@ -329,6 +363,12 @@ function ZeitPlus:addToMainMenu(menu_items)
                 end,
             },
             {
+                text = _("Artikel aus Feed"),
+                sub_item_table_func = function()
+                    return self:buildFeedMenu()
+                end,
+            },
+            {
                 text = _("Downloads-Ordner öffnen"),
                 callback = function()
                     self:openDownloadsFolder()
@@ -352,6 +392,25 @@ function ZeitPlus:addToMainMenu(menu_items)
                         callback = function()
                             self.include_images = not self.include_images
                             self.updated = true
+                        end,
+                    },
+                    {
+                        text_func = function()
+                            return T(_("Feed-URL: %1"), self.feed_url or "")
+                        end,
+                        keep_menu_open = true,
+                        callback = function()
+                            selectorInputDialog(
+                                _("RSS/Atom-Feed-URL"),
+                                "https://newsfeed.zeit.de/index",
+                                self.feed_url,
+                                function(text)
+                                    text = util.trim(text)
+                                    self.feed_url = text ~= "" and text or ZeitApi.default_feed_url
+                                    self.updated = true
+                                    self:onFlushSettings()
+                                end
+                            )
                         end,
                     },
                     {

@@ -10,15 +10,18 @@ auf dem Handy.
 1. **Anmelden**: Das Plugin schickt E-Mail und Passwort an
    `https://meine.zeit.de/anmelden` und speichert das dabei gesetzte
    Session-Cookie.
-2. **Artikel herunterladen**: Du fügst die URL eines zeit.de-Artikels ein.
-   Das Plugin lädt die Seite mit dem gespeicherten Session-Cookie (wodurch
+2. **Artikel herunterladen**: Entweder fügst du die URL eines zeit.de-Artikels
+   direkt ein, oder du wählst einen Artikel aus einem RSS/Atom-Feed aus. Das
+   Plugin lädt die Seite mit dem gespeicherten Session-Cookie (wodurch
    ZEIT+-Inhalte freigeschaltet werden statt der Bezahlschranken-Vorschau),
    extrahiert den Artikeltext samt Bildern und packt daraus ein EPUB in
    deinen Downloads-Ordner.
 
-Das Plugin lädt keine Übersicht/Feed automatisch – du fügst Artikel gezielt
-über ihre URL hinzu (z. B. per Link-Teilen von Handy/Browser, oder indem du
-die URL abtippst/einfügst).
+**ZEIT+ → Artikel aus Feed** lädt die in den Einstellungen hinterlegte
+Feed-URL, zeigt die Artikel-Überschriften als Liste an, und lädt beim
+Antippen eines Eintrags direkt das zugehörige EPUB herunter – die Liste
+bleibt dabei offen, sodass du mehrere Artikel nacheinander auswählen
+kannst, ohne jedes Mal eine URL abzutippen oder zu teilen.
 
 ## Installation
 
@@ -34,10 +37,23 @@ die URL abtippst/einfügst).
 - **ZEIT+ → Artikel-URL hinzufügen** → Artikel-URL einfügen → Download läuft,
   EPUB landet im eingestellten Zielordner (Standard:
   `<koreader-daten>/zeitplus/`).
+- **ZEIT+ → Artikel aus Feed** → zeigt die Artikel aus der eingestellten
+  Feed-URL als Liste; Antippen lädt den jeweiligen Artikel als EPUB herunter.
 - **ZEIT+ → Downloads-Ordner öffnen** öffnet diesen Ordner im Dateimanager.
-- **ZEIT+ → Einstellungen** erlaubt das Ändern des Zielordners, das
-  Ein-/Ausschalten von Bildern sowie das Anpassen der CSS-Selektoren zur
-  Artikel-Erkennung (siehe unten).
+- **ZEIT+ → Einstellungen** erlaubt das Ändern des Zielordners, der
+  Feed-URL, das Ein-/Ausschalten von Bildern sowie das Anpassen der
+  CSS-Selektoren zur Artikel-Erkennung (siehe unten).
+
+## Hinweis zur Feed-URL
+
+Als Standard ist der öffentliche ZEIT-ONLINE-Übersichts-Feed
+(`https://newsfeed.zeit.de/index`) hinterlegt. Diese Adresse konnte in der
+Entwicklungsumgebung, in der dieses Plugin gebaut wurde, nicht gegen das
+echte `zeit.de` getestet werden (siehe Hinweis zu den Artikel-Selektoren
+unten). Falls die Liste leer bleibt oder ein Fehler angezeigt wird, trage
+unter **ZEIT+ → Einstellungen → Feed-URL** eine andere Adresse ein – z. B.
+einen Ressort-Feed – von der [ZEIT-Feed-Übersicht](https://www.zeit.de/rss-index).
+Unterstützt werden RSS-2.0- und Atom-Feeds.
 
 ## Wichtiger Hinweis zu den Artikel-Selektoren
 

@@ -37,6 +37,13 @@ local ZeitApi = {
 
     login_url = "https://meine.zeit.de/anmelden?url=https%3A%2F%2Fwww.zeit.de%2Findex&entry_service=sonstige",
 
+    -- ZEIT ONLINE's public RSS overview feed. Could not be reached from
+    -- the sandbox this plugin was built in (same limitation as the
+    -- article selectors below) - if it stops working, pick another feed
+    -- URL from https://www.zeit.de/rss-index and set it in the plugin
+    -- settings.
+    default_feed_url = "https://newsfeed.zeit.de/index",
+
     -- Best-effort default selectors for the article body. ZEIT's markup
     -- can change over time; if extraction stops working, override these
     -- via the plugin settings (found by inspecting a logged-in article
@@ -295,6 +302,66 @@ function ZeitApi:extractArticleMeta(html)
         author = extractMetaName(html, "author"),
         published = extractMeta(html, "article:published_time"),
     }
+end
+
+-- ---------------------------------------------------------------------
+-- Feed parsing (RSS 2.0 / Atom)
+-- ---------------------------------------------------------------------
+
+local function feedTrim(s)
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function stripCDATA(s)
+    if not s then return s end
+    local inner = s:match("^%s*<!%[CDATA%[(.-)%]%]>%s*$")
+    return inner or s
+end
+
+local function extractFeedTag(block, tag)
+    local content = block:match("<" .. tag .. "[^>]*>(.-)</" .. tag .. ">")
+    if content then
+        return feedTrim(stripCDATA(content))
+    end
+    return nil
+end
+
+local function extractAtomLink(block)
+    return block:match('<link[^>]-rel="alternate"[^>]-href="([^"]*)"')
+        or block:match('<link[^>]-href="([^"]*)"[^>]-rel="alternate"')
+        or block:match('<link[^>]-href="([^"]*)"[^>]*/?>')
+end
+
+--- Parses an RSS 2.0 or Atom feed body into a list of
+-- { title, link, pubDate } entries (pubDate may be nil).
+function ZeitApi:parseFeed(xml)
+    local items = {}
+    for block in xml:gmatch("<item[^>]*>(.-)</item>") do
+        local title = extractFeedTag(block, "title")
+        local link = extractFeedTag(block, "link")
+        local pubdate = extractFeedTag(block, "pubDate")
+        if title and link and link ~= "" then
+            table.insert(items, { title = title, link = feedTrim(link), pubDate = pubdate })
+        end
+    end
+    if #items == 0 then
+        for block in xml:gmatch("<entry[^>]*>(.-)</entry>") do
+            local title = extractFeedTag(block, "title")
+            local link = extractAtomLink(block)
+            local pubdate = extractFeedTag(block, "updated") or extractFeedTag(block, "published")
+            if title and link and link ~= "" then
+                table.insert(items, { title = title, link = feedTrim(link), pubDate = pubdate })
+            end
+        end
+    end
+    return items
+end
+
+--- Fetches and parses the feed at feed_url. Raises an error (to be
+-- caught with pcall by the caller) on network failure.
+function ZeitApi:fetchFeed(feed_url, cookies)
+    local _content_type, content = self:loadPage(feed_url, cookies, nil)
+    return self:parseFeed(content)
 end
 
 -- ---------------------------------------------------------------------
