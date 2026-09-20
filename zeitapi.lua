@@ -60,6 +60,11 @@ local ZeitApi = {
         "div.fluid-width-video-wrapper",
         "div.youtube-wrap",
         -- zeit.de 2024+ elements that are not part of the article text:
+        "div.article-footer",
+        "div.article-tags",
+        "div.article-tags__list",
+        "nav.article-pagination",
+        "div.popover",
         "div.tools",
         "div.article-tools",
         "div#article-tools",
@@ -76,6 +81,10 @@ local ZeitApi = {
         "div#summary",
         "div.summary-card",
         "section.summary",
+        -- liveblog-only decoration
+        "div.liveblog-header__media",
+        "div.liveblog-header__media-container",
+        "a.liveblog__chapter-button--back-to-top",
     },
     -- Strings that unambiguously indicate the fetched page is showing the
     -- paywall *teaser* rather than the full ZEIT+ article. The definitive
@@ -642,10 +651,20 @@ local function removeUnwantedNodes(wanted_node, user_selectors, default_selector
 end
 
 function ZeitApi:reduceHTML(input_html, article_selectors, unwanted_selectors)
+    -- Drop livepage scaffolding that a CSS selector cannot reliably target:
+    -- <template> widget-fragments, <source srcset>-only image variants inside
+    -- <picture>, and any <script>/<style>/<noscript> the article node carried.
+    local clean = input_html:gsub("<[Tt][Ee][Mm][Pp][Ll][Aa][Tt][Ee][^>]*>(.-)</[Tt][Ee][Mm][Pp][Ll][Aa][Tt][Ee]>", "")
+    clean = clean:gsub("<[Ss][Oo][Uu][Rr][Cc][Ee][^>]*/?>", "")
+    clean = clean:gsub("<[Ss][Cc][Rr][Ii][Pp][Tt][^>]*>.-</[Ss][Cc][Rr][Ii][Pp][Tt]>", "")
+    clean = clean:gsub("<[Ss][Tt][Yy][Ll][Ee][^>]*>.-</[Ss][Tt][Yy][Ll][Ee]>", "")
+    clean = clean:gsub("<[Nn][Oo][Ss][Cc][Rr][Ii][Pp][Tt][^>]*>.-</[Nn][Oo][Ss][Cc][Rr][Ii][Pp][Tt]>", "")
+
     local htmlparser = require("htmlparser")
-    local root = htmlparser.parse(input_html, 5000)
+    local root = htmlparser.parse(clean, 5000)
     local wanted_node = selectMatchingNode(root, article_selectors, self.default_article_selectors)
     local cleaned_inner_html = removeUnwantedNodes(wanted_node, unwanted_selectors, self.default_unwanted_selectors)
+    cleaned_inner_html = cleaned_inner_html:gsub("<picture[^>]*>%s*</picture>", "")
     return "<!DOCTYPE html><html><head></head><body>" .. cleaned_inner_html .. "</body></html>"
 end
 
@@ -674,16 +693,22 @@ function ZeitApi:createEpub(epub_path, html, url, meta, include_images, message,
     local cre = require("libs/libkoreader-cre")
     local body_html = self:reduceHTML(html, article_selectors, unwanted_selectors)
 
-    -- Prepend a small header with title/byline/date so it reads naturally
-    -- as part of the article.
-    local header_parts = { string.format("<h1>%s</h1>", page_title) }
+    -- Prepend a small header. If the article page already ships its own
+    -- <h1> (it almost always does), keep only the byline/date line so the
+    -- title doesn't appear twice.
+    local header_parts = {}
+    if not body_html:lower():find("<h1") then
+        table.insert(header_parts, string.format("<h1>%s</h1>", page_title))
+    end
     if meta and (meta.author or meta.published) then
         local byline_bits = {}
         if meta.author then table.insert(byline_bits, meta.author) end
         if meta.published then table.insert(byline_bits, meta.published:sub(1, 10)) end
         table.insert(header_parts, string.format("<p><em>%s</em></p>", table.concat(byline_bits, " – ")))
     end
-    body_html = body_html:gsub("<body>", "<body>" .. table.concat(header_parts))
+    if #header_parts > 0 then
+        body_html = body_html:gsub("<body>", "<body>" .. table.concat(header_parts))
+    end
 
     body_html = cre.getBalancedHTML(body_html, 0x0)
 
