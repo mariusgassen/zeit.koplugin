@@ -445,7 +445,8 @@ function ZeitPlus:fetchArticle(url)
     end
 
     if ZeitApi:isLikelyPaywalled(html) then
-        -- Keep a copy of the suspicious page for debugging, so timez.de's
+        logger.dbg("ZeitPlus: paywall marker %q on %s", ZeitApi:paywallMarker(html), used_url)
+        -- Keep a copy of the suspicious page for debugging, so zeit.de's
         -- actual answer can be inspected when cookies are known-fresh.
         local debug_path = self.download_dir .. "zeitplus_paywall_debug.html"
         local df = io.open(debug_path, "w")
@@ -587,22 +588,39 @@ function ZeitPlus:buildIndexMenu(url)
         return { { text = _("Keine Artikel gefunden."), enabled = false } }
     end
 
+    -- Keep the two kinds separate so overview pages that mix categories
+    -- (index entries) with articles end up in a sensible structure instead
+    -- of one long mixed list: "Artikel" becomes its own submenu, categories
+    -- stay as sibling submenus.
+    local articles, indexes = {}, {}
+    for _, entry in ipairs(result) do
+        table.insert(entry.type == "index" and indexes or articles, entry)
+    end
+
+    local article_items = {}
+    for idx, entry in ipairs(articles) do
+        table.insert(article_items, {
+            text = util.htmlEntitiesToUtf8(entry.title),
+            mandatory = _("EPUB"),
+            keep_menu_open = true,
+            callback = function() self:downloadArticleUrl(entry.url) end,
+        })
+    end
+
     local items = {}
-    for idx, entry in ipairs(result) do
-        local title = util.htmlEntitiesToUtf8(entry.title)
-        if entry.type == "index" then
-            table.insert(items, {
-                text = title,
-                sub_item_table_func = function() return self:buildIndexMenu(entry.url) end,
-            })
-        else
-            table.insert(items, {
-                text = title,
-                mandatory = _("EPUB"),
-                keep_menu_open = true,
-                callback = function() self:downloadArticleUrl(entry.url) end,
-            })
-        end
+    if #indexes > 0 and #article_items > 0 then
+        table.insert(items, {
+            text = _("Artikel"),
+            sub_item_table = article_items,
+        })
+    else
+        items = article_items
+    end
+    for idx, entry in ipairs(indexes) do
+        table.insert(items, {
+            text = util.htmlEntitiesToUtf8(entry.title),
+            sub_item_table_func = function() return self:buildIndexMenu(entry.url) end,
+        })
     end
     return items
 end

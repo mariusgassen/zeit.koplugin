@@ -60,14 +60,14 @@ local ZeitApi = {
         "div.fluid-width-video-wrapper",
         "div.youtube-wrap",
     },
-    -- Strings that, if present, suggest the fetched page is still showing
-    -- the paywall teaser rather than the full ZEIT+ article (i.e. the
-    -- login session isn't unlocking premium content).
+    -- Strings that unambiguously indicate the fetched page is showing the
+    -- paywall *teaser* rather than the full ZEIT+ article. Deliberately NOT
+    -- the word "paywall" itself: zeit.de ships that in the JS of every
+    -- article page (also for unlocked, fully readable ones).
     paywall_markers = {
-        "zeit%-plus%-cta",
         "Diesen Artikel weiterlesen",
         "Sie haben schon ein Abo",
-        "paywall",
+        "Jetzt komplett lesen",
     },
 }
 
@@ -274,6 +274,17 @@ function ZeitApi:isLikelyPaywalled(html)
     return false
 end
 
+--- Returns the first paywall marker found in html, or nil. For logging
+-- which trigger caused an otherwise valid page to be treated as gated.
+function ZeitApi:paywallMarker(html)
+    for _, marker in ipairs(self.paywall_markers) do
+        if html:find(marker) then
+            return marker
+        end
+    end
+    return nil
+end
+
 --- Candidate URLs that should return the *full* single-page article text
 -- instead of the teaser/pagination variant zeit.de normally serves:
 -- ZEIT's "Komplettansicht" path suffix and its legacy query flag.
@@ -300,9 +311,14 @@ function ZeitApi:loadArticlePage(url, cookies, extra_headers)
     end
     for _, candidate in ipairs(self:articleVariants(url)) do
         local ok, content_type, content = pcall(self.loadPage, self, candidate, cookies, extra_headers)
-        if ok and content:find("<%s*article[%s>]") and not self:isLikelyPaywalled(content) then
-            logger.dbg("ZeitApi: using article variant:", candidate)
-            return candidate, content_type, content
+        if ok and content:find("<%s*article[%s>]") then
+            local marker = self:paywallMarker(content)
+            if marker then
+                logger.dbg("ZeitApi: variant still gated (%q):", candidate, marker)
+            else
+                logger.dbg("ZeitApi: using article variant:", candidate)
+                return candidate, content_type, content
+            end
         end
     end
     local content_type, content = self:loadPage(url, cookies, extra_headers)
