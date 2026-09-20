@@ -85,6 +85,21 @@ local ZeitApi = {
         "div.liveblog-header__media",
         "div.liveblog-header__media-container",
         "a.liveblog__chapter-button--back-to-top",
+        -- article action toolbars (audio, bookmark, Summarize, Z+ gift)
+        "div.article-actions",
+        "div.audio-player",
+        "div.js-freebie",
+        "button.js-show-freebie",
+        "button.summy-button",
+        "button.bookmark",
+        "div#summy-content",
+        -- AI summary popups + generic UI leftovers (verified on a 2026 page)
+        "div.z-box",
+        "button.z-box__close-button",
+        "strong.z-box__title",
+        "button.metadata__info-button",
+        "span.visually-hidden",
+        "div.iqdcontainer",
     },
     -- Strings that unambiguously indicate the fetched page is showing the
     -- paywall *teaser* rather than the full ZEIT+ article. The definitive
@@ -643,7 +658,12 @@ local function removeUnwantedNodes(wanted_node, user_selectors, default_selector
         local ok, unwanted_nodes = pcall(function() return wanted_node:select(selector) end)
         if ok and unwanted_nodes then
             for _, unwanted_node in ipairs(unwanted_nodes) do
-                node_content = removeSubstring(node_content, unwanted_node:gettext())
+                local text = unwanted_node:gettext()
+                -- Skip empty or single-character remnants: removing "" or a
+                -- lone "·"/"." by substring would shred the article text.
+                if text and #text > 1 then
+                    node_content = removeSubstring(node_content, text)
+                end
             end
         end
     end
