@@ -23,15 +23,15 @@ auf dem Handy.
    dieser Seite, technisch ein Link auf `media-delivery.zeit.de`) – ganz
    ohne eigene Text-Extraktion.
 
-**ZEIT+ → Stöbern** zeigt die in den Einstellungen hinterlegten Quellen
-(Startseite, ZEIT+-exklusive Artikel, Ausgaben des Jahres, …) als
-Menüs an: RSS/Atom-Feeds werden als Artikelliste angezeigt, HTML-Übersichtsseiten
-wie `zeit.de/index` werden nach Artikel- und weiteren Überblicks-Links
-(z. B. eine bestimmte Wochenausgabe) durchsucht, in die du weiter
-hineintippen kannst. Antippen eines Artikels lädt ihn direkt als EPUB
+**In der App (Menü → ZEIT+): „Stöbern“** zeigt die in den Einstellungen
+hinterlegten Quellen (Startseite, ZEIT+-exklusive Artikel, Ausgaben des
+Jahres, …) als Menüs an: RSS/Atom-Feeds werden als Artikelliste angezeigt,
+HTML-Übersichtsseiten wie `zeit.de/index` werden nach Artikel- und weiteren
+Überblicks-Links (z. B. eine bestimmte Wochenausgabe) durchsucht, in die du
+weiter hineintippen kannst. Antippen eines Artikels lädt ihn direkt als EPUB
 herunter – die Liste bleibt dabei offen, sodass du mehrere Artikel
-nacheinander auswählen kannst, ohne jedes Mal eine URL abzutippen oder
-zu teilen.
+nacheinander auswählen kannst, ohne jedes Mal eine URL abzutippen oder zu
+teilen.
 
 ## Installation
 
@@ -43,20 +43,30 @@ zu teilen.
 
 ## Nutzung
 
-- **ZEIT+ → Nicht angemeldet** antippen → E-Mail und Passwort eingeben
-  (nur falls der automatische Login noch funktioniert, siehe unten).
-- **ZEIT+ → Session-Cookies laden (Datei)** → lädt die Session-Cookies aus
-  der Datei `zeitplus_cookies.txt` (empfohlen, siehe unten).
-- **ZEIT+ → Link hinzufügen** → Artikel-URL, `epaper.zeit.de`-Ausgabenlink
-  oder direkten EPUB-Link einfügen → Download läuft, EPUB landet im
-  eingestellten Zielordner (Standard: `<koreader-daten>/zeitplus/`).
-- **ZEIT+ → Stöbern** → Quelle auswählen → Artikel oder Unterordner (z. B.
-  eine Wochenausgabe) antippen; ein Artikel wird direkt als EPUB
-  heruntergeladen.
-- **ZEIT+ → Downloads-Ordner öffnen** öffnet diesen Ordner im Dateimanager.
-- **ZEIT+ → Einstellungen** erlaubt das Ändern des Zielordners, der
-  Stöbern-Quellen, das Ein-/Ausschalten von Bildern sowie das Anpassen der
-  CSS-Selektoren zur Artikel-Erkennung (siehe unten).
+Das Plugin öffnet sich als **eigene, vollbild‑„App“** (Menü → **ZEIT+**)
+mit der DIE‑ZEIT‑Kopfzeile und dem Abo‑Status:
+
+- **Stöbern** → konfigurierte Übersichtsseiten (Startseite, ZEIT+‑Artikel,
+  Ausgaben des Jahres, …); Artikel antippen lädt sie direkt als EPUB.
+- **Ausgaben des Jahres** → direkt zu den Wochenausgaben des aktuellen
+  Jahres (`zeit.de/<Jahr>/index`), von dort in eine Ausgabe und weiter zu
+  deren Artikeln.
+- **Meine Artikel** → die bereits heruntergeladenen EPUBs im Zielordner
+  (neueste zuerst); antippen öffnet sie im Reader, lange drücken löscht sie.
+- **Link hinzufügen** → Artikel‑URL, `epaper.zeit.de`‑Ausgabenlink oder
+  direkten EPUB‑Link einfügen; das EPUB landet im eingestellten Zielordner
+  (Standard: `<koreader-daten>/zeitplus/`).
+- **Downloads‑Ordner öffnen** verlässt die App und öffnet den Ordner im
+  Dateimanager.
+- **Einstellungen** erlaubt das Laden der Session‑Cookies, das Ändern des
+  Zielordners, der Stöbern‑Quellen, das Ein‑/Ausschalten von Bildern sowie
+  das Anpassen der CSS‑Selektoren zur Artikel‑Erkennung (siehe unten).
+- Der unterste Eintrag zeigt den Anmeldestatus; antippen meldet ab bzw.
+  lädt die Session‑Cookies aus der Datei.
+
+Innerhalb der App navigierst du wie im Dateimanager: Das „X“ (oder Wischen
+nach Süden) führt eine Ebene zurück, das Home‑Symbol links oben springt
+zurück zum Startbildschirm.
 
 ## Hinweis zum Login: Session-Cookies per SSH einfügen (empfohlen)
 
@@ -88,8 +98,9 @@ Session-Cookies ins Plugin zu legen** – ganz ohne Tippen auf dem E-Reader:
 
    Format: eine `name=value`-Zeile pro Cookie (leere Zeilen und `#`-Kommentare
    werden ignoriert).
-5. Im Plugin **ZEIT+ → Session-Cookies laden (Datei)** antippen. Das Menü
-   zeigt danach „Angemeldet als: <deine E-Mail>“.
+5. Im Plugin **ZEIT+ → Einstellungen → Session-Cookies laden (Datei)**
+   antippen (bzw. einfach den untersten Eintrag „Nicht angemeldet“). Die
+   App zeigt danach „Angemeldet als: <deine E-Mail>“.
 
 Haltbarkeit: Das Cookie `zeit_sso_201501` ist ca. **1 Jahr** gültig, das
 Session-Cookie `zeit_sso_session_201501` nur **etwa 3 Tage**. Läuft es ab,

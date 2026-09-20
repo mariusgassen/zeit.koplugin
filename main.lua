@@ -17,7 +17,6 @@ local LuaSettings = require("luasettings")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local lfs = require("libs/libkoreader-lfs")
 local util = require("util")
 local ZeitApi = require("zeitapi")
@@ -199,6 +198,11 @@ end
 
 function ZeitPlus:isLoggedIn()
     return self.cookies ~= nil and #self.cookies > 0
+end
+
+--- Reads the "email" claim from the logged-in session cookie (a JWT), if any.
+function ZeitPlus:accountEmail()
+    return sessionEmailFromCookies(self.cookies)
 end
 
 --- Path of the plain-text cookie file the user fills via SSH.
@@ -469,6 +473,7 @@ function ZeitPlus:buildIndexMenu(url)
         else
             table.insert(items, {
                 text = title,
+                mandatory = _("EPUB"),
                 keep_menu_open = true,
                 callback = function() self:downloadArticleUrl(entry.url) end,
             })
@@ -567,127 +572,55 @@ local function multilineInputDialog(title, hint, current, on_save)
     dialog:onShowKeyboard()
 end
 
+--- Opens the multiline dialog for the "Name = URL" browsing sources.
+function ZeitPlus:editFeedSources()
+    multilineInputDialog(
+        _("Quellen (eine pro Zeile: Name = URL)"),
+        "Übersicht = https://www.zeit.de/index",
+        self.feed_sources,
+        function(text)
+            text = util.trim(text)
+            self.feed_sources = text ~= "" and text or defaultFeedSourcesText()
+            self.updated = true
+            self:onFlushSettings()
+        end
+    )
+end
+
+--- Opens the dialog for the CSS selectors of the article body.
+function ZeitPlus:editArticleSelectors()
+    selectorInputDialog(
+        _("CSS-Selektoren für den Artikeltext"),
+        "article, div.article-body, …",
+        self.article_selectors,
+        function(text)
+            self.article_selectors = text
+            self.updated = true
+            self:onFlushSettings()
+        end
+    )
+end
+
+--- Opens the dialog for the CSS selectors of elements to drop from articles.
+function ZeitPlus:editUnwantedSelectors()
+    selectorInputDialog(
+        _("CSS-Selektoren für auszuschließende Elemente"),
+        "div.article__social, aside, …",
+        self.unwanted_selectors,
+        function(text)
+            self.unwanted_selectors = text
+            self.updated = true
+            self:onFlushSettings()
+        end
+    )
+end
+
 function ZeitPlus:addToMainMenu(menu_items)
     menu_items.zeitplus = {
         text = _("ZEIT+"),
-        sub_item_table = {
-            {
-                text_func = function()
-                    if self:isLoggedIn() then
-                        return T(_("Angemeldet als: %1"), self.username or sessionEmailFromCookies(self.cookies) or "?")
-                    end
-                    return _("Nicht angemeldet")
-                end,
-                keep_menu_open = true,
-                callback = function()
-                    if self:isLoggedIn() then
-                        self:logout()
-                    else
-                        self:showLoginDialog()
-                    end
-                end,
-            },
-            {
-                text = _("Session-Cookies laden (Datei)"),
-                keep_menu_open = true,
-                callback = function(touchmenu_instance)
-                    if self:loadCookiesFromFile() and touchmenu_instance then
-                        touchmenu_instance:updateItems()
-                    end
-                end,
-                separator = true,
-            },
-            {
-                text = _("Link hinzufügen"),
-                keep_menu_open = true,
-                callback = function()
-                    self:showAddArticleDialog()
-                end,
-            },
-            {
-                text = _("Stöbern"),
-                sub_item_table_func = function()
-                    return self:buildSourceMenu()
-                end,
-            },
-            {
-                text = _("Downloads-Ordner öffnen"),
-                callback = function()
-                    self:openDownloadsFolder()
-                end,
-            },
-            {
-                text = _("Einstellungen"),
-                sub_item_table = {
-                    {
-                        text_func = function()
-                            return T(_("Zielordner: %1"), BD.dirpath(filemanagerutil.abbreviate(self.download_dir)))
-                        end,
-                        keep_menu_open = true,
-                        callback = function(touchmenu_instance)
-                            self:setDownloadDirectory(touchmenu_instance)
-                        end,
-                    },
-                    {
-                        text = _("Bilder herunterladen"),
-                        checked_func = function() return self.include_images end,
-                        callback = function()
-                            self.include_images = not self.include_images
-                            self.updated = true
-                        end,
-                    },
-                    {
-                        text = _("Quellen zum Stöbern anpassen"),
-                        keep_menu_open = true,
-                        callback = function()
-                            multilineInputDialog(
-                                _("Quellen (eine pro Zeile: Name = URL)"),
-                                "Übersicht = https://www.zeit.de/index",
-                                self.feed_sources,
-                                function(text)
-                                    text = util.trim(text)
-                                    self.feed_sources = text ~= "" and text or defaultFeedSourcesText()
-                                    self.updated = true
-                                    self:onFlushSettings()
-                                end
-                            )
-                        end,
-                    },
-                    {
-                        text = _("Artikel-Selektoren anpassen"),
-                        keep_menu_open = true,
-                        callback = function()
-                            selectorInputDialog(
-                                _("CSS-Selektoren für den Artikeltext"),
-                                "article, div.article-body, …",
-                                self.article_selectors,
-                                function(text)
-                                    self.article_selectors = text
-                                    self.updated = true
-                                    self:onFlushSettings()
-                                end
-                            )
-                        end,
-                    },
-                    {
-                        text = _("Auszuschließende Elemente anpassen"),
-                        keep_menu_open = true,
-                        callback = function()
-                            selectorInputDialog(
-                                _("CSS-Selektoren für auszuschließende Elemente"),
-                                "div.article__social, aside, …",
-                                self.unwanted_selectors,
-                                function(text)
-                                    self.unwanted_selectors = text
-                                    self.updated = true
-                                    self:onFlushSettings()
-                                end
-                            )
-                        end,
-                    },
-                },
-            },
-        },
+        callback = function()
+            require("zeitplusui"):new(self):showHome()
+        end,
     }
 end
 
