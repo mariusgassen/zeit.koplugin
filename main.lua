@@ -814,7 +814,18 @@ function ZeitPlus:addToMainMenu(menu_items)
     menu_items.zeitplus = {
         text = _("ZEIT+"),
         callback = function()
-            require("zeitplusui"):new(self):showHome()
+            local ReaderUI = require("apps/reader/readerui")
+            -- If called from inside a book, leave the reader first so the
+            -- app really "takes over" instead of floating over the book.
+            if ReaderUI.instance then
+                ReaderUI.instance:onHome()
+                local plugin = self
+                UIManager:nextTick(function()
+                    require("zeitplusui"):new(plugin):showHome()
+                end)
+            else
+                require("zeitplusui"):new(self):showHome()
+            end
         end,
     }
 end

@@ -250,6 +250,13 @@ function ZeitPlusUI:buildSettings()
             end,
         },
         {
+            text = _("Downloads-Ordner öffnen"),
+            callback = function()
+                self:close()
+                plugin:openDownloadsFolder()
+            end,
+        },
+        {
             text = _("Quellen zum Stöbern anpassen"),
             callback = function() plugin:editFeedSources() end,
         },
@@ -306,13 +313,6 @@ function ZeitPlusUI:showHome()
     table.insert(home_items, {
         text = _("Link hinzufügen"),
         callback = function() plugin:showAddArticleDialog() end,
-    })
-    table.insert(home_items, {
-        text = _("Downloads-Ordner öffnen"),
-        callback = function()
-            self:close()
-            plugin:openDownloadsFolder()
-        end,
     })
     table.insert(home_items, {
         text = _("Einstellungen"),
