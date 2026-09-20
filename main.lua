@@ -465,12 +465,24 @@ function ZeitPlus:fetchArticle(url)
         end
 
         local hint
+        local session_present = false
+        if self.cookies then
+            for _, cookie in ipairs(self.cookies) do
+                if cookie.name == "zeit_sso_session_201501" then
+                    session_present = true
+                end
+            end
+        end
+        local exp = self:sessionExpiry()
+        local session_line = session_present
+            and T(_("Session-Cookie vorhanden (Ablauf: %1)"), os.date("%d.%m.%Y %H:%M", exp or os.time()))
+            or _("Session-Cookie FEHLT – bitte unter Einstellungen → Session-Cookies laden (Datei) neu laden.")
         if self:sessionExpiry() == nil then
-            hint = _("Es sind keine Session-Cookies geladen – ZEIT+ Artikel bleiben gesperrt.\nLade Cookies unter Einstellungen → Session-Cookies laden (Datei).\nTrotzdem als EPUB speichern?")
+            hint = T(_("Es sind keine Session-Cookies geladen – ZEIT+ Artikel bleiben gesperrt.\n%1\nTrotzdem als EPUB speichern?"), session_line)
         elseif self:isSessionExpired() then
-            hint = T(_("Die ZEIT+ Session ist abgelaufen (da %1).\nLade neue Cookies unter Einstellungen → Session-Cookies laden (Datei).\nTrotzdem als EPUB speichern?"), os.date("%d.%m.%Y %H:%M", self:sessionExpiry()))
+            hint = T(_("Die ZEIT+ Session ist abgelaufen (da %1).\n%2\nLade neue Cookies unter Einstellungen → Session-Cookies laden (Datei).\nTrotzdem als EPUB speichern?"), os.date("%d.%m.%Y %H:%M", self:sessionExpiry()), session_line)
         else
-            hint = _("Dieser Artikel scheint trotz gültiger Session hinter der Bezahlschranke zu stecken.\nLiegt die Sperre vor (DEBUG: zeitplus_paywall_debug.html), starte neu.\nTrotzdem als EPUB speichern?")
+            hint = T(_("Der Server hat den Artikel trotz gültiger Session gekürzt (DEBUG: zeitplus_paywall_debug.html).\nGrund: %1\n%2\nSession neu laden und neu testen?\nTrotzdem als EPUB speichern?"), ZeitApi:paywallMarker(html), session_line)
         end
         local go_on = UI:confirm(hint, _("Abbrechen"), _("Trotzdem speichern"))
         if not go_on then

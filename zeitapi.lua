@@ -61,10 +61,13 @@ local ZeitApi = {
         "div.youtube-wrap",
     },
     -- Strings that unambiguously indicate the fetched page is showing the
-    -- paywall *teaser* rather than the full ZEIT+ article. Deliberately NOT
-    -- the word "paywall" itself: zeit.de ships that in the JS of every
-    -- article page (also for unlocked, fully readable ones).
+    -- paywall *teaser* rather than the full ZEIT+ article. The definitive
+    -- signal is zeit.de's own truncation attribute on the <html> element;
+    -- the other phrases appear in the gated copy. Deliberately NOT the word
+    -- "paywall" itself: zeit.de ships that in the JS of every article page
+    -- (also for unlocked, fully readable ones).
     paywall_markers = {
+        "data%-is%-truncated%-by%-paywall",
         "Diesen Artikel weiterlesen",
         "Sie haben schon ein Abo",
         "Jetzt komplett lesen",
