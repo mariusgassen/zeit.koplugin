@@ -78,7 +78,6 @@ function AppPage:init()
     self.zones = {}
     self.page = 1
     self.dimen = Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() }
-    InputContainer.init(self)
     self:build()
 end
 
