@@ -463,7 +463,7 @@ function ZeitPlus:buildIndexMenu(url)
     end
 
     local items = {}
-    for _, entry in ipairs(result) do
+    for idx, entry in ipairs(result) do
         local title = util.htmlEntitiesToUtf8(entry.title)
         if entry.type == "index" then
             table.insert(items, {
