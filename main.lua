@@ -533,7 +533,21 @@ function ZeitPlus:fetchArticle(url)
         #unwanted_selectors > 0 and unwanted_selectors or nil
     )
     if created then
+        self:saveCover(file_path, meta.image)
         self:openDownloaded(file_path)
+    end
+end
+
+--- Best-effort: saves the article's og:image teaser next to the EPUB as
+-- <name>.cover.jpg so the library cover grid can show it.
+function ZeitPlus:saveCover(epub_path, image_url)
+    if not image_url or image_url == "" then return end
+    local cover_path = epub_path:gsub("%.epub$", ".cover.jpg")
+    local ok, err = pcall(function()
+        ZeitApi:downloadFile(cover_path, image_url, self.cookies)
+    end)
+    if not ok then
+        logger.dbg("zeitplus: cover download failed:", tostring(err))
     end
 end
 

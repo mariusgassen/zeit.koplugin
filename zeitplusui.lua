@@ -1,15 +1,15 @@
 --[[--
 App-style, full-screen user interface for the ZEIT+ plugin.
 
-Replaces the plugin's nested touch menus with a single, full-screen
-"app" spreading over KOReader's modern Menu widget: a home screen with
-the DIE ZEIT branding and the subscription status, browsing (Stöbern,
-Ausgaben des Jahres), the article library (read/delete downloads), "Link
-hinzufügen" and the settings - all reachable from one place.
+The app's two flagship screens are custom widgets (zeitpluswidgets.lua):
+a branded Home screen and the "Meine Artikel" cover grid. Everything else
+(browse results, settings) is a KOReader Menu page shown over the Home
+widget; backing out of a page returns to the app.
 
 @module koplugin.zeitplus.zeitplusui
 ]]
 
+local Blitbuffer = require("ffi/blitbuffer")
 local ConfirmBox = require("ui/widget/confirmbox")
 local FFIUtil = require("ffi/util")
 local InfoMessage = require("ui/widget/infomessage")
@@ -20,9 +20,13 @@ local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 local T = FFIUtil.template
 
---- Menu subclass that behaves like an app: items drill into sub-pages
--- without closing, and dialogs leave the app open underneath.
+local ZeitPlusWidgets = require("zeitpluswidgets")
+
+--- Menu subclass used for the app's drill-in pages (browse results,
+-- settings); in page_mode its back button closes the page instead of
+-- tearing down the whole app.
 local AppMenu = Menu:extend{
+    page_mode = false,
     home_title = nil,
     home_subtitle = nil,
     home_item_table = nil,
@@ -62,6 +66,8 @@ end
 function AppMenu:onLeftButtonTap()
     if #self.item_table_stack > 0 then
         self:goHome()
+    elseif self.page_mode then
+        UIManager:close(self)
     else
         self:onCloseAllMenus()
     end
@@ -114,86 +120,87 @@ function ZeitPlusUI:new(plugin)
     return o
 end
 
-function ZeitPlusUI:showMenu(opts)
-    self:close()
-    local menu = AppMenu:new{
-        title = opts.title,
-        subtitle = opts.subtitle,
-        title_bar_fm_style = opts.title_bar_fm_style,
-        title_bar_left_icon = opts.title_bar_left_icon,
-        item_table = opts.item_table,
-        close_callback = function()
-            self.menu = nil
-        end,
-    }
-    self.menu = menu
-    -- So the plugin can close the app UI (e.g. before auto-opening a
-    -- downloaded article in the reader).
-    self.plugin.app_ui = self
-    UIManager:show(menu)
+function ZeitPlusUI:closePage()
+    if self.page_widget then
+        UIManager:close(self.page_widget)
+        self.page_widget = nil
+    end
+end
+
+function ZeitPlusUI:closeGrid()
+    if self.grid_widget then
+        UIManager:close(self.grid_widget)
+        self.grid_widget = nil
+    end
 end
 
 function ZeitPlusUI:close()
-    if self.menu then
-        UIManager:close(self.menu)
-        self.menu = nil
+    self:closePage()
+    self:closeGrid()
+    if self.home_widget then
+        UIManager:close(self.home_widget)
+        self.home_widget = nil
     end
+end
+
+function ZeitPlusUI:quit()
+    self:close()
 end
 
 function ZeitPlusUI:refresh()
-    if self.menu then
-        self.menu:updateItems()
+    if self.grid_widget then
+        self.grid_widget:refresh()
+    end
+    if self.home_widget then
+        self.home_widget:refresh()
     end
 end
 
-local function notLoggedInHint()
-    return { { text = _("Bitte zuerst anmelden (Einstellungen → Session-Cookies laden)."), select_enabled = false } }
+function ZeitPlusUI:showHome()
+    self:closePage()
+    self:closeGrid()
+    self.plugin.app_ui = self
+    if self.home_widget then
+        self.home_widget:refresh()
+        return
+    end
+    local home = ZeitPlusWidgets.Home:new{ ui = self }
+    self.home_widget = home
+    UIManager:show(home)
 end
 
---- Gate shown instead of a source's article list when the session is
--- missing or expired (stale cookies would only produce paywall teasers).
-function ZeitPlusUI:browseGate()
-    local plugin = self.plugin
-    if plugin:sessionExpiry() and plugin:isSessionExpired() then
-        return {
-            { text = _("Session abgelaufen – neue Cookies laden (Einstellungen → Session-Cookies laden (Datei))."), select_enabled = false },
-        }
+function ZeitPlusUI:showPage(title, items, subtitle)
+    self:closePage()
+    self.plugin.app_ui = self
+    if not self.home_widget then
+        self:showHome()
     end
-    return notLoggedInHint()
+    local menu = AppMenu:new{
+        title = title,
+        subtitle = subtitle,
+        page_mode = true,
+        item_table = items,
+        close_callback = function()
+            self.page_widget = nil
+        end,
+    }
+    self.page_widget = menu
+    UIManager:show(menu)
 end
 
-function ZeitPlusUI:buildLibrary()
-    local plugin = self.plugin
-    local files = {}
-    local ok, iter, dir_obj = pcall(lfs.dir, plugin.download_dir)
-    if ok and iter then
-        for entry in iter, dir_obj do
-            if entry:lower():match("%.epub$") then
-                local mtime = lfs.attributes(plugin.download_dir .. entry, "modification")
-                table.insert(files, { name = entry, path = plugin.download_dir .. entry, mtime = mtime or 0 })
-            end
-        end
+function ZeitPlusUI:showLibrary()
+    self:closePage()
+    self.plugin.app_ui = self
+    if not self.home_widget then
+        self:showHome()
     end
-    table.sort(files, function(a, b) return a.mtime > b.mtime end)
-
-    local items = {}
-    for _, file in ipairs(files) do
-        local title = file.name:gsub("^%d%d%-%d%d%-%d%d[_-]", ""):gsub("%.epub$", "")
-        table.insert(items, {
-            text = title,
-            mandatory = os.date("%d.%m.%Y", file.mtime),
-            callback = function()
-                self:openBook(file.path)
-            end,
-            hold_callback = function()
-                self:confirmDelete(file.path, title)
-            end,
-        })
+    if self.grid_widget then
+        self.grid_widget:refresh()
+        return
     end
-    if #items == 0 then
-        return { { text = _("Noch keine Artikel heruntergeladen."), select_enabled = false } }
-    end
-    return items
+    local grid = ZeitPlusWidgets.Grid:new{ ui = self }
+    self.grid_widget = grid
+    UIManager:show(grid)
 end
 
 function ZeitPlusUI:openBook(path)
@@ -212,11 +219,140 @@ function ZeitPlusUI:confirmDelete(path, title)
         cancel_text = _("Abbrechen"),
         ok_callback = function()
             os.remove(path)
-            if self.menu then
-                self.menu:switchItemTable(_("Meine Artikel"), self:buildLibrary())
-            end
+            os.remove(path:gsub("%.epub$", ".cover.jpg"))
+            self:refresh()
         end,
     })
+end
+
+local function notLoggedInHint()
+    return {
+        {
+            text = _("Bitte zuerst anmelden (Einstellungen → Session-Cookies laden)."),
+            select_enabled = false,
+        },
+    }
+end
+
+--- Gate shown instead of a source's article list when the session is
+-- missing or expired (stale cookies would only produce paywall teasers).
+function ZeitPlusUI:browseGate()
+    local plugin = self.plugin
+    if plugin:sessionExpiry() and plugin:isSessionExpired() then
+        return {
+            {
+                text = _("Session abgelaufen – neue Cookies laden (Einstellungen → Session-Cookies laden (Datei))."),
+                select_enabled = false,
+            },
+        }
+    end
+    return notLoggedInHint()
+end
+
+function ZeitPlusUI:openBrowsePage(name, url)
+    local plugin = self.plugin
+    if not plugin:isLoggedIn() or (plugin:sessionExpiry() and plugin:isSessionExpired()) then
+        self:showPage(name, self:browseGate())
+        return
+    end
+    local ok, res = pcall(function()
+        return plugin:buildIndexMenu(url)
+    end)
+    if ok and type(res) == "table" and #res > 0 then
+        self:showPage(name, res)
+    elseif ok then
+        self:showPage(name, {
+            { text = _("Keine Einträge gefunden."), select_enabled = false },
+        })
+    else
+        UIManager:show(InfoMessage:new{ text = T(_("Fehler beim Laden:\n%1"), tostring(res)) })
+    end
+end
+
+function ZeitPlusUI:buildLibrary()
+    local plugin = self.plugin
+    local files = {}
+    local ok, iter, dir_obj = pcall(lfs.dir, plugin.download_dir)
+    if ok and iter then
+        for entry in iter, dir_obj do
+            if entry:lower():match("%.epub$") then
+                local path = plugin.download_dir .. entry
+                local mtime = lfs.attributes(path, "modification") or 0
+                table.insert(files, {
+                    title = entry:gsub("^%d%d%-%d%d%-%d%d[_-]", ""):gsub("%.epub$", ""),
+                    date = os.date("%d.%m.%Y", mtime),
+                    path = path,
+                    cover = path:gsub("%.epub$", ".cover.jpg"),
+                    mtime = mtime,
+                })
+            end
+        end
+    end
+    table.sort(files, function(a, b) return a.mtime > b.mtime end)
+    return files
+end
+
+function ZeitPlusUI:buildHomeData()
+    local plugin = self.plugin
+
+    local header = { title = "ZEIT+", pill = "", pill_color = Blitbuffer.COLOR_DARK_GRAY, subtitle = "" }
+    local exp = plugin:sessionExpiry()
+    if not exp then
+        header.pill = _("Nicht angemeldet")
+        header.subtitle = _("Cookies laden: Einstellungen → Session-Cookies laden (Datei)")
+    else
+        local remaining = exp - os.time()
+        header.pill = plugin:sessionCountdownLabel() or _("Session läuft")
+        if remaining <= 0 then
+            header.pill_color = Blitbuffer.COLOR_RED
+        elseif remaining < 86400 then
+            header.pill_color = Blitbuffer.COLOR_ORANGE
+        else
+            header.pill_color = Blitbuffer.COLOR_GREEN
+        end
+        header.subtitle = T(_("Angemeldet als %1"), plugin:accountEmail() or plugin.username or "?")
+    end
+
+    local rows = {}
+    local sources = plugin:feedSourceList()
+    if #sources == 0 then
+        table.insert(rows, {
+            text = _("Bitte zuerst Quellen in den Einstellungen eintragen."),
+        })
+    else
+        for _, source in ipairs(sources) do
+            local name, url = source.name, source.url
+            table.insert(rows, {
+                text = name,
+                bold = false,
+                callback = function()
+                    self:openBrowsePage(name, url)
+                end,
+            })
+        end
+    end
+
+    table.insert(rows, {
+        text = _("Meine Artikel"),
+        bold = true,
+        callback = function()
+            self:showLibrary()
+        end,
+    })
+    table.insert(rows, {
+        text = _("Link hinzufügen"),
+        callback = function()
+            plugin:showAddArticleDialog()
+        end,
+    })
+    table.insert(rows, {
+        text = _("Einstellungen"),
+        callback = function()
+            self:showPage(_("Einstellungen"), self:buildSettings())
+        end,
+    })
+
+    return { header = header, rows = rows }
 end
 
 function ZeitPlusUI:buildSettings()
@@ -276,90 +412,6 @@ function ZeitPlusUI:buildSettings()
             text = _("Von ZEIT+ abmelden"),
             callback = function() plugin:logout() end,
         },
-    }
-end
-
-function ZeitPlusUI:showHome()
-    local plugin = self.plugin
-
-    -- Flat: the configured sources (Übersicht, Nur ZEIT+, Ausgaben des
-    -- Jahres, …) are direct entries; each drills straight into its
-    -- article list. No extra "Stöbern" level.
-    local home_items = {}
-    local sources = plugin:feedSourceList()
-    if #sources == 0 then
-        table.insert(home_items, {
-            text = _("Bitte zuerst Quellen in den Einstellungen eintragen."),
-            select_enabled = false,
-        })
-    else
-        for idx, source in ipairs(sources) do
-            local url = source.url
-            table.insert(home_items, {
-                text = source.name,
-                sub_item_table_func = function()
-                    if not plugin:isLoggedIn() then return self:browseGate() end
-                    if plugin:sessionExpiry() and plugin:isSessionExpired() then return self:browseGate() end
-                    return plugin:buildIndexMenu(url)
-                end,
-            })
-        end
-    end
-
-    table.insert(home_items, {
-        text = _("Meine Artikel"),
-        sub_item_table_func = function() return self:buildLibrary() end,
-    })
-    table.insert(home_items, {
-        text = _("Link hinzufügen"),
-        callback = function() plugin:showAddArticleDialog() end,
-    })
-    table.insert(home_items, {
-        text = _("Einstellungen"),
-        sub_item_table_func = function() return self:buildSettings() end,
-    })
-    table.insert(home_items, {
-        text_func = function()
-            if plugin:isLoggedIn() then
-                return T(_("Angemeldet als %1"), plugin:accountEmail() or plugin.username or "?")
-            end
-            return _("Nicht angemeldet")
-        end,
-        mandatory_func = function()
-            return plugin:sessionCountdownLabel()
-        end,
-        callback = function()
-            if plugin:isLoggedIn() then
-                UIManager:show(ConfirmBox:new{
-                    text = _("Von ZEIT+ abmelden?"),
-                    ok_text = _("Abmelden"),
-                    cancel_text = _("Abbrechen"),
-                    ok_callback = function() plugin:logout() end,
-                })
-            else
-                plugin:loadCookiesFromFile()
-            end
-        end,
-    })
-
-    local subtitle
-    if plugin:isLoggedIn() then
-        local countdown = plugin:sessionCountdownLabel()
-        if countdown then
-            subtitle = "ZEIT+ · " .. T(_("Session %1"), countdown)
-        else
-            subtitle = "ZEIT+ · " .. _("Angemeldet")
-        end
-    else
-        subtitle = "ZEIT+ · " .. _("Nicht angemeldet")
-    end
-
-    self:showMenu{
-        title = _("DIE ZEIT"),
-        subtitle = subtitle,
-        title_bar_fm_style = true,
-        title_bar_left_icon = "home",
-        item_table = home_items,
     }
 end
 
