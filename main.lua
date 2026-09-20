@@ -41,6 +41,15 @@ local function parseCommaSeparatedOption(opt)
     return result
 end
 
+--- "2026-09-20" -> "20.09.26", nil for anything unparseable.
+local function formatItemDate(date)
+    local year, month, day = (date or ""):match("(%d%d%d%d)%-(%d%d)%-(%d%d)")
+    if year then
+        return ("%02d.%02d.%02d"):format(tonumber(day), tonumber(month), year % 100)
+    end
+    return nil
+end
+
 --- Default "Name = URL" list of browsable ZEIT overview pages, offered
 -- until the user customizes it in the settings.
 local function defaultFeedSourcesText()
@@ -303,14 +312,29 @@ function ZeitPlus:refreshCookiesFromFile()
 end
 
 --- Closes the app UI (if open) and opens the freshly downloaded EPUB in the
--- reader. Called after a successful download.
+-- reader. Called after a successful download. When the reader is closed
+-- again, the ZEIT+ app is re-opened so it feels like browsing a magazine.
 function ZeitPlus:openDownloaded(file_path)
     local ReaderUI = require("apps/reader/readerui")
+    local plugin = self
     UIManager:nextTick(function()
-        if self.app_ui then
-            self.app_ui:close()
+        if plugin.app_ui then
+            plugin.app_ui:close()
         end
-        local ok, err = pcall(function() ReaderUI:showReader(file_path) end)
+        local ok, err = pcall(function()
+            ReaderUI:showReader(file_path, nil, false, nil, function()
+                local instance = ReaderUI.instance
+                if instance then
+                    local orig_onClose = instance.onClose
+                    function instance:onClose(full_refresh)
+                        orig_onClose(self, full_refresh)
+                        UIManager:nextTick(function()
+                            require("zeitplusui"):new(plugin):showHome()
+                        end)
+                    end
+                end
+            end)
+        end)
         if not ok then
             UIManager:show(InfoMessage:new{ text = T(_("Konnte Artikel nicht öffnen:\n%1"), tostring(err)) })
         end
@@ -621,9 +645,14 @@ function ZeitPlus:buildIndexMenu(url)
 
     local article_items = {}
     for idx, entry in ipairs(articles) do
+        local parts = {}
+        if entry.plus then parts[#parts + 1] = "Z+" end
+        local d = entry.date and formatItemDate(entry.date)
+        if d then parts[#parts + 1] = d end
+        if #parts == 0 then parts[#parts + 1] = _("EPUB") end
         table.insert(article_items, {
             text = util.htmlEntitiesToUtf8(entry.title),
-            mandatory = _("EPUB"),
+            mandatory = table.concat(parts, " · "),
             keep_menu_open = true,
             callback = function() self:downloadArticleUrl(entry.url) end,
         })
@@ -641,6 +670,7 @@ function ZeitPlus:buildIndexMenu(url)
     for idx, entry in ipairs(indexes) do
         table.insert(items, {
             text = util.htmlEntitiesToUtf8(entry.title),
+            mandatory = entry.date and formatItemDate(entry.date),
             sub_item_table_func = function() return self:buildIndexMenu(entry.url) end,
         })
     end

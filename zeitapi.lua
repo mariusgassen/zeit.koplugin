@@ -59,6 +59,23 @@ local ZeitApi = {
         "figure.is-type-video",
         "div.fluid-width-video-wrapper",
         "div.youtube-wrap",
+        -- zeit.de 2024+ elements that are not part of the article text:
+        "div.tools",
+        "div.article-tools",
+        "div#article-tools",
+        "div.article-toolbar",
+        "div.article-meta",
+        "div.article__meta",
+        "div.share-box",
+        "div.gift-box",
+        "div#comments",
+        "div.comment-box",
+        "div.comment-bar",
+        "div.feedback",
+        "div.article-summary",
+        "div#summary",
+        "div.summary-card",
+        "section.summary",
     },
     -- Strings that unambiguously indicate the fetched page is showing the
     -- paywall *teaser* rather than the full ZEIT+ article. The definitive
@@ -347,6 +364,7 @@ function ZeitApi:extractArticleMeta(html)
         title = extractMeta(html, "og:title") or html:match([[<title[^>]*>(.-)</title>]]),
         author = extractMetaName(html, "author"),
         published = extractMeta(html, "article:published_time"),
+        image = extractMeta(html, "og:image"),
     }
 end
 
@@ -432,6 +450,22 @@ function ZeitApi:parseFeed(xml)
     return items
 end
 
+--- Normalizes a feed date (ISO-8601 or RFC 822) to "YYYY-MM-DD".
+function ZeitApi:isoFromPubDate(pubdate)
+    if not pubdate or pubdate == "" then return nil end
+    local iso = pubdate:match("(%d%d%d%d%-%d%d%-%d%d)")
+    if iso then return iso end
+    local day, month, year = pubdate:match("(%d%d?)%s+(%a+)%s+(%d%d%d%d)")
+    local months = {
+        Jan = "01", Feb = "02", Mar = "03", Apr = "04", May = "05", Jun = "06",
+        Jul = "07", Aug = "08", Sep = "09", Oct = "10", Nov = "11", Dec = "12",
+    }
+    if day and months[month] then
+        return ("%s-%s-%02d"):format(year, months[month], tonumber(day))
+    end
+    return nil
+end
+
 -- ---------------------------------------------------------------------
 -- Index/overview pages (e.g. zeit.de/index, zeit.de/exklusive-zeit-artikel,
 -- a weekly zeit.de/<year>/<issue>/index) - scraped as a fallback for pages
@@ -476,7 +510,13 @@ local function extractZeitLinks(html)
                     local clean_text = feedTrim((clean:gsub("<[^>]+>", " "):gsub("%s+", " ")))
                     if clean_text ~= "" then
                         seen[href] = true
-                        table.insert(out, { href = href, text = clean_text })
+                        local img = text:match('<img[^>]-src="([^"]*)"')
+                        local date = text:match('<time[^>]-datetime="(%d%d%d%d%-%d%d%-%d%d)')
+                        local low = text:lower()
+                        local plus = low:find("zeitplus") ~= nil
+                            or text:find(">%s*Z+%s*<") ~= nil
+                            or text:find("title=[\"']Z+[\"']") ~= nil
+                        table.insert(out, { href = href, text = clean_text, img = img, date = date, plus = plus })
                     end
                 end
             end
@@ -510,8 +550,8 @@ local function classifyZeitLink(href)
     return nil
 end
 
---- Scrapes an overview page into a list of { type, title, url } entries,
--- type being "article" or "index".
+--- Scrapes an overview page into a list of { type, title, url, date, plus,
+-- img } entries, type being "article" or "index".
 function ZeitApi:parseIndexHtml(html)
     local out = {}
     for _, link in ipairs(extractZeitLinks(html)) do
@@ -521,23 +561,27 @@ function ZeitApi:parseIndexHtml(html)
             if kind == "index" then
                 title = issueLabel(link.href) or title
             end
-            table.insert(out, { type = kind, title = title, url = link.href })
+            table.insert(out, { type = kind, title = title, url = link.href, date = link.date, plus = link.plus, img = link.img })
         end
     end
     return out
 end
 
 --- Fetches url and returns its entries as a list of { type, title, url }
--- (type "article" or "index"), trying an RSS/Atom feed parse first and
--- falling back to scraping it as an HTML overview page. Raises an error
--- (to be caught with pcall by the caller) on network failure.
+-- (type "article" or "index", plus date/plus/img when known), trying an
+-- RSS/Atom feed parse first and falling back to scraping it as an HTML
+-- overview page. Raises an error (to be caught with pcall by the caller)
+-- on network failure.
 function ZeitApi:fetchIndex(url, cookies)
     local _content_type, content = self:loadPage(url, cookies, nil)
     local feed_items = self:parseFeed(content)
     if #feed_items > 0 then
         local out = {}
         for _, item in ipairs(feed_items) do
-            table.insert(out, { type = "article", title = item.title, url = item.link })
+            table.insert(out, {
+                type = "article", title = item.title, url = item.link,
+                date = self:isoFromPubDate(item.pubDate),
+            })
         end
         return out
     end
