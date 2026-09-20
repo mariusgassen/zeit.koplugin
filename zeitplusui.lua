@@ -127,6 +127,9 @@ function ZeitPlusUI:showMenu(opts)
         end,
     }
     self.menu = menu
+    -- So the plugin can close the app UI (e.g. before auto-opening a
+    -- downloaded article in the reader).
+    self.plugin.app_ui = self
     UIManager:show(menu)
 end
 
@@ -145,6 +148,18 @@ end
 
 local function notLoggedInHint()
     return { { text = _("Bitte zuerst anmelden (Einstellungen → Session-Cookies laden)."), select_enabled = false } }
+end
+
+--- Gate shown instead of a source's article list when the session is
+-- missing or expired (stale cookies would only produce paywall teasers).
+function ZeitPlusUI:browseGate()
+    local plugin = self.plugin
+    if plugin:sessionExpiry() and plugin:isSessionExpired() then
+        return {
+            { text = _("Session abgelaufen – neue Cookies laden (Einstellungen → Session-Cookies laden (Datei))."), select_enabled = false },
+        }
+    end
+    return notLoggedInHint()
 end
 
 function ZeitPlusUI:buildLibrary()
@@ -260,61 +275,74 @@ end
 function ZeitPlusUI:showHome()
     local plugin = self.plugin
 
-    local home_items = {
-        {
-            text = _("Stöbern"),
-            sub_item_table_func = function()
-                if not plugin:isLoggedIn() then return notLoggedInHint() end
-                return plugin:buildSourceMenu()
-            end,
-        },
-        {
-            text = _("Ausgaben des Jahres"),
-            sub_item_table_func = function()
-                if not plugin:isLoggedIn() then return notLoggedInHint() end
-                return plugin:buildIndexMenu("https://www.zeit.de/" .. os.date("%Y") .. "/index")
-            end,
-        },
-        {
-            text = _("Meine Artikel"),
-            sub_item_table_func = function() return self:buildLibrary() end,
-        },
-        {
-            text = _("Link hinzufügen"),
-            callback = function() plugin:showAddArticleDialog() end,
-        },
-        {
-            text = _("Downloads-Ordner öffnen"),
-            callback = function()
-                self:close()
-                plugin:openDownloadsFolder()
-            end,
-        },
-        {
-            text = _("Einstellungen"),
-            sub_item_table_func = function() return self:buildSettings() end,
-        },
-        {
-            text_func = function()
-                if plugin:isLoggedIn() then
-                    return T(_("Angemeldet als %1"), plugin:accountEmail() or plugin.username or "?")
+    -- Flat: the configured sources (Übersicht, Nur ZEIT+, Ausgaben des
+    -- Jahres, …) are direct entries; each drills straight into its
+    -- article list. No extra "Stöbern" level.
+    local home_items = {}
+    local sources = plugin:feedSourceList()
+    if #sources == 0 then
+        table.insert(home_items, {
+            text = _("Bitte zuerst Quellen in den Einstellungen eintragen."),
+            select_enabled = false,
+        })
+    else
+        for idx, source in ipairs(sources) do
+            local url = source.url
+            table.insert(home_items, {
+                text = source.name,
+                sub_item_table_func = function()
+                    if not plugin:isLoggedIn() then return self:browseGate() end
+                    if plugin:sessionExpiry() and plugin:isSessionExpired() then return self:browseGate() end
+                    return plugin:buildIndexMenu(url)
+                end,
+            })
+        end
+    end
+
+    table.insert(home_items, {
+        text = _("Meine Artikel"),
+        sub_item_table_func = function() return self:buildLibrary() end,
+    })
+    table.insert(home_items, {
+        text = _("Link hinzufügen"),
+        callback = function() plugin:showAddArticleDialog() end,
+    })
+    table.insert(home_items, {
+        text = _("Downloads-Ordner öffnen"),
+        callback = function()
+            self:close()
+            plugin:openDownloadsFolder()
+        end,
+    })
+    table.insert(home_items, {
+        text = _("Einstellungen"),
+        sub_item_table_func = function() return self:buildSettings() end,
+    })
+    table.insert(home_items, {
+        text_func = function()
+            if plugin:isLoggedIn() then
+                local expiry = plugin:sessionExpiryLabel()
+                local email = plugin:accountEmail() or plugin.username or "?"
+                if expiry then
+                    return T(_("Angemeldet als %1 (%2)"), email, expiry)
                 end
-                return _("Nicht angemeldet")
-            end,
-            callback = function()
-                if plugin:isLoggedIn() then
-                    UIManager:show(ConfirmBox:new{
-                        text = _("Von ZEIT+ abmelden?"),
-                        ok_text = _("Abmelden"),
-                        cancel_text = _("Abbrechen"),
-                        ok_callback = function() plugin:logout() end,
-                    })
-                else
-                    plugin:loadCookiesFromFile()
-                end
-            end,
-        },
-    }
+                return T(_("Angemeldet als %1"), email)
+            end
+            return _("Nicht angemeldet")
+        end,
+        callback = function()
+            if plugin:isLoggedIn() then
+                UIManager:show(ConfirmBox:new{
+                    text = _("Von ZEIT+ abmelden?"),
+                    ok_text = _("Abmelden"),
+                    cancel_text = _("Abbrechen"),
+                    ok_callback = function() plugin:logout() end,
+                })
+            else
+                plugin:loadCookiesFromFile()
+            end
+        end,
+    })
 
     local status
     if plugin:isLoggedIn() then

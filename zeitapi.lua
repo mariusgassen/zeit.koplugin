@@ -274,6 +274,41 @@ function ZeitApi:isLikelyPaywalled(html)
     return false
 end
 
+--- Candidate URLs that should return the *full* single-page article text
+-- instead of the teaser/pagination variant zeit.de normally serves:
+-- ZEIT's "Komplettansicht" path suffix and its legacy query flag.
+function ZeitApi:articleVariants(url)
+    local base = url:match("^([^?#]+)") or url
+    local variants = {}
+    if not base:match("/komplettansicht/?$") then
+        variants[#variants + 1] = base .. "/komplettansicht"
+    end
+    variants[#variants + 1] = url .. (url:find("%?") and "&" or "?") .. "komplettansicht=1"
+    return variants
+end
+
+--- Loads an article page, preferring ZEIT's "Komplettansicht" (full-text
+-- single page) variants so the whole article lands in the EPUB instead of
+-- only the first teaser part. Falls back to the original url when none of
+-- the variants loads or still shows the paywall. Returns (used_url,
+-- content_type, html).
+function ZeitApi:loadArticlePage(url, cookies, extra_headers)
+    local plain = url:match("^([^?#]+)") or url
+    if plain:match("/komplettansicht/?$") then
+        local content_type, content = self:loadPage(url, cookies, extra_headers)
+        return url, content_type, content
+    end
+    for _, candidate in ipairs(self:articleVariants(url)) do
+        local ok, content_type, content = pcall(self.loadPage, self, candidate, cookies, extra_headers)
+        if ok and content:find("<%s*article[%s>]") and not self:isLikelyPaywalled(content) then
+            logger.dbg("ZeitApi: using article variant:", candidate)
+            return candidate, content_type, content
+        end
+    end
+    local content_type, content = self:loadPage(url, cookies, extra_headers)
+    return url, content_type, content
+end
+
 local function extractMeta(html, property)
     local pattern1 = '<meta[^>]-property="' .. property .. '"[^>]-content="([^"]*)"'
     local pattern2 = '<meta[^>]-content="([^"]*)"[^>]-property="' .. property .. '"'

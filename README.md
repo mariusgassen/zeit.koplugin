@@ -12,10 +12,15 @@ auf dem Handy.
    Session-Cookie.
 2. **Artikel herunterladen**: Entweder fügst du die URL eines zeit.de-Artikels
    direkt ein, oder du stöberst dich über die konfigurierten Übersichtsseiten
-   zum Artikel durch. Das Plugin lädt die Seite mit dem gespeicherten
+   zum Artikel durch. Das Plugin lädt dabei bevorzugt ZEITs
+   **„Komplettansicht“** (`…/komplettansicht`) – nur diese liefert den
+   gesamten Artikeltext auf einer Seite; die normale Artikel-URL zeigt
+   sonst nur den ersten Teil. Es lädt die Seite mit dem gespeicherten
    Session-Cookie (wodurch ZEIT+-Inhalte freigeschaltet werden statt der
    Bezahlschranken-Vorschau), extrahiert den Artikeltext samt Bildern und
-   packt daraus ein EPUB in deinen Downloads-Ordner.
+   packt daraus ein EPUB in deinen Downloads-Ordner. **Nach dem Download
+   öffnet sich das EPUB direkt im Reader** – du musst es nicht erst im
+   Downloads-Ordner suchen.
 3. **Ganze Ausgabe herunterladen**: Für den Link einer Ausgabe auf
    `epaper.zeit.de` (z. B. `https://epaper.zeit.de/abo/diezeit/17.09.2026`)
    lädt das Plugin stattdessen direkt das von ZEIT selbst erzeugte,
@@ -44,13 +49,12 @@ teilen.
 ## Nutzung
 
 Das Plugin öffnet sich als **eigene, vollbild‑„App“** (Menü → **ZEIT+**)
-mit der DIE‑ZEIT‑Kopfzeile und dem Abo‑Status:
+mit der DIE‑ZEIT‑Kopfzeile und dem Abo‑Status (inkl. verbleibender
+Session‑Gültigkeit):
 
-- **Stöbern** → konfigurierte Übersichtsseiten (Startseite, ZEIT+‑Artikel,
-  Ausgaben des Jahres, …); Artikel antippen lädt sie direkt als EPUB.
-- **Ausgaben des Jahres** → direkt zu den Wochenausgaben des aktuellen
-  Jahres (`zeit.de/<Jahr>/index`), von dort in eine Ausgabe und weiter zu
-  deren Artikeln.
+- Die in den Einstellungen hinterlegten Quellen (Startseite, ZEIT+‑Artikel,
+  Ausgaben des Jahres, …) stehen **direkt auf dem Startbildschirm** – ein
+  Tipp führt sofort zur Artikelliste, ohne Zwischenebene.
 - **Meine Artikel** → die bereits heruntergeladenen EPUBs im Zielordner
   (neueste zuerst); antippen öffnet sie im Reader, lange drücken löscht sie.
 - **Link hinzufügen** → Artikel‑URL, `epaper.zeit.de`‑Ausgabenlink oder
@@ -63,6 +67,10 @@ mit der DIE‑ZEIT‑Kopfzeile und dem Abo‑Status:
   das Anpassen der CSS‑Selektoren zur Artikel‑Erkennung (siehe unten).
 - Der unterste Eintrag zeigt den Anmeldestatus; antippen meldet ab bzw.
   lädt die Session‑Cookies aus der Datei.
+
+Ein Artikel wird beim Antippen direkt als EPUB heruntergeladen und dann
+**sofort im Reader geöffnet**. Unter **Einstellungen** können die
+Session‑Cookies auch nachträglich aktualisiert werden.
 
 Innerhalb der App navigierst du wie im Dateimanager: Das „X“ (oder Wischen
 nach Süden) führt eine Ebene zurück, das Home‑Symbol links oben springt
@@ -104,8 +112,13 @@ Session-Cookies ins Plugin zu legen** – ganz ohne Tippen auf dem E-Reader:
 
 Haltbarkeit: Das Cookie `zeit_sso_201501` ist ca. **1 Jahr** gültig, das
 Session-Cookie `zeit_sso_session_201501` nur **etwa 3 Tage**. Läuft es ab,
-landen Artikel wieder hinter der Bezahlschranke; dann Schritt 3–5 einfach
-wiederholen.
+landen Artikel wieder hinter der Bezahlschranke.
+
+Das Plugin zeigt den Anmeldestatus samt **Restlaufzeit** direkt auf dem
+Startbildschirm; beim Start prüft es außerdem automatisch, ob du die Datei
+zwischenzeitlich per SSH aktualisiert hast, und übernimmt dann die
+**neueste** Session. Einfach Schritt 3–5 nur dann wiederholen, wenn der
+Status „Session abgelaufen“ zeigt.
 
 ## Hinweis zu den Stöbern-Quellen
 

@@ -121,20 +121,27 @@ local function b64urlDecode(s)
     return table.concat(out)
 end
 
+--- Returns the value of the cookie with the given name, or nil.
+local function cookieValue(cookies, name)
+    for idx, c in ipairs(cookies or {}) do
+        if c.name == name then return c.value end
+    end
+    return nil
+end
+
+--- Returns the decoded JWT payload of a cookie value, or nil.
+local function jwtPayload(value)
+    local payload = tostring(value or ""):match("^[^.]*%.([^.]*)%.")
+    if payload then return b64urlDecode(payload) end
+    return nil
+end
+
 --- Best-effort: reads the "email" claim from ZEIT's session cookie (a JWT)
 -- so the menu can show who is logged in even without a stored username.
 local function sessionEmailFromCookies(cookies)
-    for _, c in ipairs(cookies or {}) do
-        if c.name == "zeit_sso_session_201501" then
-            local payload = tostring(c.value or ""):match("^[^.]*%.([^.]*)%.")
-            if payload then
-                local decoded = b64urlDecode(payload)
-                if decoded then
-                    local email = decoded:match('"email"%s*:%s*"([^"]+)"')
-                    if email then return email end
-                end
-            end
-        end
+    local payload = jwtPayload(cookieValue(cookies, "zeit_sso_session_201501"))
+    if payload then
+        return payload:match('"email"%s*:%s*"([^"]+)"')
     end
     return nil
 end
@@ -193,6 +200,10 @@ function ZeitPlus:init()
         self.feed_sources = defaultFeedSourcesText()
     end
 
+    -- If zeitplus_cookies.txt was updated via SSH, pick up the newer
+    -- session automatically instead of keeping the possibly-expired one.
+    self:refreshCookiesFromFile()
+
     self.ui.menu:registerToMainMenu(self)
 end
 
@@ -203,6 +214,88 @@ end
 --- Reads the "email" claim from the logged-in session cookie (a JWT), if any.
 function ZeitPlus:accountEmail()
     return sessionEmailFromCookies(self.cookies)
+end
+
+--- Expiry time (Unix seconds) of the ZEIT+ session cookie, or nil.
+function ZeitPlus:sessionExpiry()
+    local payload = jwtPayload(cookieValue(self.cookies, "zeit_sso_session_201501"))
+    if payload then
+        return tonumber(payload:match('"exp"%s*:%s*([%d]+)'))
+    end
+    return nil
+end
+
+--- Returns true if the session cookie is expired or missing.
+function ZeitPlus:isSessionExpired()
+    local exp = self:sessionExpiry()
+    if exp == nil then return true end
+    return exp <= os.time()
+end
+
+--- Human-readable remaining validity of the session ("läuft in X Tagen, Y Std. ab"),
+-- "Session abgelaufen", or nil when no parseable exp claim exists.
+function ZeitPlus:sessionExpiryLabel()
+    local exp = self:sessionExpiry()
+    if exp == nil then return nil end
+    local remaining = exp - os.time()
+    if remaining <= 0 then
+        return _("Session abgelaufen")
+    end
+    local days = math.floor(remaining / 86400)
+    local hours = math.floor((remaining % 86400) / 3600)
+    if days <= 0 then
+        return T(_("Session läuft in %1 Std. ab"), hours)
+    end
+    if days == 1 then
+        return T(_("Session läuft in 1 Tag, %1 Std. ab"), hours)
+    end
+    return T(_("Session läuft in %1 Tagen, %2 Std. ab"), days, hours)
+end
+
+--- The parsed "Name = URL" list of browseable sources.
+function ZeitPlus:feedSourceList()
+    return parseFeedSources(self.feed_sources)
+end
+
+--- Auto-reloads the session cookies from zeitplus_cookies.txt when the file
+-- contains a *newer* session than the one currently in memory (this happens
+-- when the file is updated via SSH but the plugin still holds the last ones
+-- from zeitplus.lua). Returns true if updated.
+function ZeitPlus:refreshCookiesFromFile()
+    local f = io.open(self:cookiesFilePath(), "r")
+    if not f then return false end
+    local content = f:read("*a")
+    f:close()
+    local file_cookies = parseCookies(content)
+    local file_exp
+    local payload = jwtPayload(cookieValue(file_cookies, "zeit_sso_session_201501"))
+    if payload then
+        file_exp = tonumber(payload:match('"exp"%s*:%s*([%d]+)'))
+    end
+    if not file_exp then return false end
+    local stored_exp = self:sessionExpiry()
+    if stored_exp == nil or file_exp > stored_exp then
+        self.cookies = file_cookies
+        self.updated = true
+        self:onFlushSettings()
+        return true
+    end
+    return false
+end
+
+--- Closes the app UI (if open) and opens the freshly downloaded EPUB in the
+-- reader. Called after a successful download.
+function ZeitPlus:openDownloaded(file_path)
+    local ReaderUI = require("apps/reader/readerui")
+    UIManager:nextTick(function()
+        if self.app_ui then
+            self.app_ui:close()
+        end
+        local ok, err = pcall(function() ReaderUI:showReader(file_path) end)
+        if not ok then
+            UIManager:show(InfoMessage:new{ text = T(_("Konnte Artikel nicht öffnen:\n%1"), tostring(err)) })
+        end
+    end)
 end
 
 --- Path of the plain-text cookie file the user fills via SSH.
@@ -327,17 +420,31 @@ function ZeitPlus:fetchArticle(url)
     local UI = require("ui/trapper")
     UI:info(_("Lade Artikel…"))
 
-    local content_type, html = ZeitApi:loadPage(url, self.cookies, nil)
+    local used_url, content_type, html = ZeitApi:loadArticlePage(url, self.cookies, nil)
     content_type = content_type and util.trim(content_type:match("^[^;]*") or content_type) or ""
     if not content_type:find("html") then
         error(_("Die URL liefert keinen HTML-Artikel."))
     end
 
     if ZeitApi:isLikelyPaywalled(html) then
-        local go_on = UI:confirm(
-            _("Dieser Artikel scheint noch hinter der Bezahlschranke zu stecken (Anmeldung evtl. abgelaufen). Trotzdem als EPUB speichern?"),
-            _("Abbrechen"), _("Trotzdem speichern")
-        )
+        -- Keep a copy of the suspicious page for debugging, so timez.de's
+        -- actual answer can be inspected when cookies are known-fresh.
+        local debug_path = self.download_dir .. "zeitplus_paywall_debug.html"
+        local df = io.open(debug_path, "w")
+        if df then
+            df:write(html)
+            df:close()
+        end
+
+        local hint
+        if self:sessionExpiry() == nil then
+            hint = _("Es sind keine Session-Cookies geladen – ZEIT+ Artikel bleiben gesperrt.\nLade Cookies unter Einstellungen → Session-Cookies laden (Datei).\nTrotzdem als EPUB speichern?")
+        elseif self:isSessionExpired() then
+            hint = T(_("Die ZEIT+ Session ist abgelaufen (da %1).\nLade neue Cookies unter Einstellungen → Session-Cookies laden (Datei).\nTrotzdem als EPUB speichern?"), os.date("%d.%m.%Y %H:%M", self:sessionExpiry()))
+        else
+            hint = _("Dieser Artikel scheint trotz gültiger Session hinter der Bezahlschranke zu stecken.\nLiegt die Sperre vor (DEBUG: zeitplus_paywall_debug.html), starte neu.\nTrotzdem als EPUB speichern?")
+        end
+        local go_on = UI:confirm(hint, _("Abbrechen"), _("Trotzdem speichern"))
         if not go_on then
             error(ZeitApi.dismissed_error_code)
         end
@@ -349,19 +456,19 @@ function ZeitPlus:fetchArticle(url)
     local file_path = ("%s%s_%s.epub"):format(self.download_dir, os.date("%y-%m-%d"), safe_title)
 
     if lfs.attributes(file_path, "mode") == "file" then
-        UIManager:show(InfoMessage:new{ text = T(_("Bereits heruntergeladen:\n%1"), BD.filepath(file_path)) })
+        self:openDownloaded(file_path)
         return
     end
 
     local article_selectors = parseCommaSeparatedOption(self.article_selectors)
     local unwanted_selectors = parseCommaSeparatedOption(self.unwanted_selectors)
     local created = ZeitApi:createEpub(
-        file_path, html, url, meta, self.include_images, title,
+        file_path, html, used_url, meta, self.include_images, title,
         #article_selectors > 0 and article_selectors or nil,
         #unwanted_selectors > 0 and unwanted_selectors or nil
     )
     if created then
-        UIManager:show(InfoMessage:new{ text = T(_("Artikel gespeichert:\n%1"), BD.filepath(file_path)) })
+        self:openDownloaded(file_path)
     end
 end
 
@@ -375,12 +482,12 @@ function ZeitPlus:fetchDirectEpub(epub_url, title)
     local safe_title = util.getSafeFilename(title or epub_url, nil, 100)
     local file_path = ("%s%s_%s.epub"):format(self.download_dir, os.date("%y-%m-%d"), safe_title)
     if lfs.attributes(file_path, "mode") == "file" then
-        UIManager:show(InfoMessage:new{ text = T(_("Bereits heruntergeladen:\n%1"), BD.filepath(file_path)) })
+        self:openDownloaded(file_path)
         return
     end
 
     if ZeitApi:downloadFile(file_path, epub_url, self.cookies) then
-        UIManager:show(InfoMessage:new{ text = T(_("Ausgabe gespeichert:\n%1"), BD.filepath(file_path)) })
+        self:openDownloaded(file_path)
     end
 end
 
