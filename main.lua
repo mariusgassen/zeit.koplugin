@@ -444,6 +444,15 @@ function ZeitPlus:fetchArticle(url)
         error(_("Die URL liefert keinen HTML-Artikel."))
     end
 
+    -- Always keep the page that was actually processed, so that a wrong
+    -- result (e.g. only the AI summary being saved) can be inspected.
+    local debug_last = io.open(self.download_dir .. "zeitplus_debug_last.html", "w")
+    if debug_last then
+        debug_last:write(("<!-- used_url: %s -->\n"):format(used_url))
+        debug_last:write(html)
+        debug_last:close()
+    end
+
     if ZeitApi:isLikelyPaywalled(html) then
         logger.dbg("ZeitPlus: paywall marker %q on %s", ZeitApi:paywallMarker(html), used_url)
         -- Keep a copy of the suspicious page for debugging, so zeit.de's
