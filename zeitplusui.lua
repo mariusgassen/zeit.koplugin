@@ -321,14 +321,12 @@ function ZeitPlusUI:showHome()
     table.insert(home_items, {
         text_func = function()
             if plugin:isLoggedIn() then
-                local expiry = plugin:sessionExpiryLabel()
-                local email = plugin:accountEmail() or plugin.username or "?"
-                if expiry then
-                    return T(_("Angemeldet als %1 (%2)"), email, expiry)
-                end
-                return T(_("Angemeldet als %1"), email)
+                return T(_("Angemeldet als %1"), plugin:accountEmail() or plugin.username or "?")
             end
             return _("Nicht angemeldet")
+        end,
+        mandatory_func = function()
+            return plugin:sessionCountdownLabel()
         end,
         callback = function()
             if plugin:isLoggedIn() then
@@ -344,16 +342,21 @@ function ZeitPlusUI:showHome()
         end,
     })
 
-    local status
+    local subtitle
     if plugin:isLoggedIn() then
-        status = _("Angemeldet")
+        local countdown = plugin:sessionCountdownLabel()
+        if countdown then
+            subtitle = "ZEIT+ · " .. T(_("Session %1"), countdown)
+        else
+            subtitle = "ZEIT+ · " .. _("Angemeldet")
+        end
     else
-        status = _("Nicht angemeldet")
+        subtitle = "ZEIT+ · " .. _("Nicht angemeldet")
     end
 
     self:showMenu{
         title = _("DIE ZEIT"),
-        subtitle = "ZEIT+ · " .. status,
+        subtitle = subtitle,
         title_bar_fm_style = true,
         title_bar_left_icon = "home",
         item_table = home_items,

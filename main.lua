@@ -252,6 +252,24 @@ function ZeitPlus:sessionExpiryLabel()
     return T(_("Session läuft in %1 Tagen, %2 Std. ab"), days, hours)
 end
 
+--- Short form of the remaining session validity for tight UI spots:
+-- "2 T 14 h", "5 h", "12 min", "abgelaufen" or nil when not logged in.
+function ZeitPlus:sessionCountdownLabel()
+    if not self:isLoggedIn() then return nil end
+    local exp = self:sessionExpiry()
+    if exp == nil then return _("abgelaufen") end
+    local remaining = exp - os.time()
+    if remaining <= 0 then return _("abgelaufen") end
+    local days = math.floor(remaining / 86400)
+    local hours = math.floor((remaining % 86400) / 3600)
+    if days > 0 then
+        if hours > 0 then return T(_("%1 T %2 h"), days, hours) end
+        return T(_("%1 T"), days)
+    end
+    if hours > 0 then return T(_("%1 h"), hours) end
+    return T(_("%1 min"), math.max(1, math.floor(remaining / 60)))
+end
+
 --- The parsed "Name = URL" list of browseable sources.
 function ZeitPlus:feedSourceList()
     return parseFeedSources(self.feed_sources)
