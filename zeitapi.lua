@@ -408,7 +408,18 @@ local function extractZeitLinks(html)
             if href:match("^https?://www%.zeit%.de") then
                 href = stripQueryAndFragment(href)
                 if not seen[href] then
-                    local clean_text = feedTrim((text:gsub("<[^>]+>", " "):gsub("%s+", " ")))
+                    -- Drop <script>/<noscript> JSON-LD blobs and <style> the
+                    -- teaser anchors contain (they would otherwise show up
+                    -- as huge garbage menu titles).
+                    local clean = text
+                    while clean:find("<[Ss][Cc][Rr][Ii][Pp][Tt][^>]*>.-</[Ss][Cc][Rr][Ii][Pp][Tt]>")
+                        or clean:find("<[Nn][Oo][Ss][Cc][Rr][Ii][Pp][Tt][^>]*>.-</[Nn][Oo][Ss][Cc][Rr][Ii][Pp][Tt]>")
+                        or clean:find("<[Ss][Tt][Yy][Ll][Ee][^>]*>.-</[Ss][Tt][Yy][Ll][Ee]>") do
+                        clean = clean:gsub("<[Ss][Cc][Rr][Ii][Pp][Tt][^>]*>.-</[Ss][Cc][Rr][Ii][Pp][Tt]>", "")
+                        clean = clean:gsub("<[Nn][Oo][Ss][Cc][Rr][Ii][Pp][Tt][^>]*>.-</[Nn][Oo][Ss][Cc][Rr][Ii][Pp][Tt]>", "")
+                        clean = clean:gsub("<[Ss][Tt][Yy][Ll][Ee][^>]*>.-</[Ss][Tt][Yy][Ll][Ee]>", "")
+                    end
+                    local clean_text = feedTrim((clean:gsub("<[^>]+>", " "):gsub("%s+", " ")))
                     if clean_text ~= "" then
                         seen[href] = true
                         table.insert(out, { href = href, text = clean_text })
@@ -418,6 +429,17 @@ local function extractZeitLinks(html)
         end
     end
     return out
+end
+
+--- For weekly-issue links (zeit.de/2026/40/index) returns a readable
+-- "Ausgabe 40/2026" label, since their anchor only contains a JSON-LD
+-- cover-image script. Returns nil for any other URL.
+local function issueLabel(href)
+    local year, issue = href:match("^https?://www%.zeit%.de/(%d%d%d%d)/(%d+)/index/?$")
+    if year and issue then
+        return _("Ausgabe ") .. issue .. "/" .. year
+    end
+    return nil
 end
 
 --- Classifies a zeit.de URL as "article" (has a date/issue segment in its
@@ -441,7 +463,11 @@ function ZeitApi:parseIndexHtml(html)
     for _, link in ipairs(extractZeitLinks(html)) do
         local kind = classifyZeitLink(link.href)
         if kind then
-            table.insert(out, { type = kind, title = link.text, url = link.href })
+            local title = link.text
+            if kind == "index" then
+                title = issueLabel(link.href) or title
+            end
+            table.insert(out, { type = kind, title = title, url = link.href })
         end
     end
     return out
