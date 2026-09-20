@@ -28,6 +28,7 @@ The widgets talk to a tiny controller interface provided by ZeitPlusUI:
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
+local FFIUtil = require("ffi/util")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local Font = require("ui/font")
@@ -48,6 +49,8 @@ local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 
 local ZeitPlusWidgets = {}
+
+local T = FFIUtil.template
 
 local PAD = 20
 
@@ -302,7 +305,7 @@ function ZeitPlusWidgets.Home:build()
     end
 
     self:_addPagination(vgroup, y, screen_h - PAD, pages,
-        _("Seite %1 von %2"):format(self.page, pages))
+        T(_("Seite %1 von %2"), self.page, pages))
 end
 
 -- ---------------------------------------------------------------------
@@ -459,7 +462,7 @@ function ZeitPlusWidgets.Grid:build()
     flushRack()
 
     self:_addPagination(vgroup, rack_y, screen_h - PAD, pages,
-        _("Seite %1 von %2"):format(self.page, pages))
+        T(_("Seite %1 von %2"), self.page, pages))
 end
 
 return ZeitPlusWidgets
